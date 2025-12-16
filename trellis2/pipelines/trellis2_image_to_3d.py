@@ -533,8 +533,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if preprocess_image:
             image = self.preprocess_image(image)
         torch.manual_seed(seed)
-        cond_512 = self.get_cond([image], 512)
-        cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
+        cond_1024 = self.get_cond([image], 1024)
+        cond_512 = cond_1024
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32, '2048_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
