@@ -364,6 +364,8 @@ def image_to_3d(
     tex_slat_guidance_rescale: float,
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
+
+    max_num_tokens: int,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
@@ -396,6 +398,7 @@ def image_to_3d(
             "1536": "1536_cascade",
         }[resolution],
         return_latent=True,
+        max_num_tokens=max_num_tokens,
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
@@ -546,6 +549,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     shape_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.5, step=0.01)
                     shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     shape_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
+                    max_num_tokens = gr.Slider(10000, 200000, label="Max Number of Tokens", value=50000, step=1000)
                 gr.Markdown("Stage 3: Material Generation")
                 with gr.Row():
                     tex_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=1.0, step=0.1)
@@ -599,7 +603,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         inputs=[
             image_prompt, seed, resolution,
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
-            shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
+            shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t, max_num_tokens,
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t,
         ],
         outputs=[output_buf, preview_output],
