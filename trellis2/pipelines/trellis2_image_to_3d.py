@@ -523,6 +523,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             assert 'shape_slat_flow_model_1024' in self.models, "No 1024 resolution shape SLat flow model found."
             assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
+        elif pipeline_type == '2048_cascade':
+            assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
+            assert 'shape_slat_flow_model_1024' in self.models, "No 1024 resolution shape SLat flow model found."
+            assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
         
@@ -531,7 +535,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
-        ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32, '2048_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
             num_samples, sparse_structure_sampler_params
@@ -573,6 +577,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_512, cond_1024,
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 1536,
+                coords, shape_slat_sampler_params,
+                max_num_tokens
+            )
+            tex_slat = self.sample_tex_slat(
+                cond_1024, self.models['tex_slat_flow_model_1024'],
+                shape_slat, tex_slat_sampler_params
+            )
+        elif pipeline_type == '2048_cascade':
+            shape_slat, res = self.sample_shape_slat_cascade(
+                cond_512, cond_1024,
+                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                512, 2048,
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )

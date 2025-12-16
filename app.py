@@ -301,8 +301,8 @@ def image_to_base64(image):
 def start_session(req: gr.Request):
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     os.makedirs(user_dir, exist_ok=True)
-    
-    
+
+
 def end_session(req: gr.Request):
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shutil.rmtree(user_dir)
@@ -330,8 +330,8 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
         'coords': shape_slat.coords.cpu().numpy(),
         'res': res,
     }
-    
-    
+
+
 def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
     shape_slat = SparseTensor(
         feats=torch.from_numpy(state['shape_slat_feats']).cuda(),
@@ -396,6 +396,7 @@ def image_to_3d(
             "512": "512",
             "1024": "1024_cascade",
             "1536": "1536_cascade",
+            "2048": "2048_cascade",
         }[resolution],
         return_latent=True,
         max_num_tokens=max_num_tokens,
@@ -405,7 +406,7 @@ def image_to_3d(
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
     state = pack_state(latents)
     torch.cuda.empty_cache()
-    
+
     # --- HTML Construction ---
     # The Stack of 48 Images
     images_html = ""
@@ -413,14 +414,14 @@ def image_to_3d(
         for s_idx in range(STEPS):
             # ID Naming Convention: view-m{mode}-s{step}
             unique_id = f"view-m{m_idx}-s{s_idx}"
-            
+
             # Logic: Only Mode 0, Step 0 is visible initially
             is_visible = (m_idx == DEFAULT_MODE and s_idx == DEFAULT_STEP)
             vis_class = "visible" if is_visible else ""
-            
+
             # Image Source
             img_base64 = image_to_base64(Image.fromarray(images[mode['render_key']][s_idx]))
-            
+
             # Render the Tag
             images_html += f"""
                 <img id="{unique_id}" 
@@ -428,10 +429,10 @@ def image_to_3d(
                      src="{img_base64}" 
                      loading="eager">
             """
-    
+
     # Button Row HTML
     btns_html = ""
-    for idx, mode in enumerate(MODES):        
+    for idx, mode in enumerate(MODES):
         active_class = "active" if idx == DEFAULT_MODE else ""
         # Note: onclick calls the JS function defined in Head
         btns_html += f"""
@@ -440,7 +441,7 @@ def image_to_3d(
                  onclick="selectMode({idx})"
                  title="{mode['name']}">
         """
-    
+
     # Assemble the full component
     full_html = f"""
     <div class="previewer-container">
@@ -468,7 +469,7 @@ def image_to_3d(
         </div>
     </div>
     """
-    
+
     return state, full_html
 
 
@@ -523,20 +524,20 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     * Upload an image (preferably with an alpha-masked foreground object) and click Generate to create a 3D asset.
     * Click Extract GLB to export and download the generated GLB file if you're satisfied with the result. Otherwise, try another time.
     """)
-    
+
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
-            
-            resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
+
+            resolution = gr.Radio(["512", "1024", "1536", "2048"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
-            
+
             generate_btn = gr.Button("Generate")
-                
-            with gr.Accordion(label="Advanced Settings", open=False):                
+
+            with gr.Accordion(label="Advanced Settings", open=False):
                 gr.Markdown("Stage 1: Sparse Structure Generation")
                 with gr.Row():
                     ss_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=7.5, step=0.1)
@@ -555,7 +556,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     tex_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=1.0, step=0.1)
                     tex_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.0, step=0.01)
                     tex_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
-                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)                
+                    tex_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
 
         with gr.Column(scale=10):
             with gr.Walkthrough(selected=0) as walkthrough:
@@ -565,7 +566,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 with gr.Step("Extract", id=1):
                     glb_output = gr.Model3D(label="Extracted GLB", height=724, show_label=True, display_mode="solid", clear_color=(0.25, 0.25, 0.25, 1.0))
                     download_btn = gr.DownloadButton(label="Download GLB")
-                    
+
         with gr.Column(scale=1, min_width=172):
             examples = gr.Examples(
                 examples=[
@@ -578,14 +579,14 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                 run_on_click=True,
                 examples_per_page=18,
             )
-                    
+
     output_buf = gr.State()
-    
+
 
     # Handlers
     demo.load(start_session)
     demo.unload(end_session)
-    
+
     image_prompt.upload(
         preprocess_image,
         inputs=[image_prompt],
@@ -608,7 +609,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         ],
         outputs=[output_buf, preview_output],
     )
-    
+
     extract_btn.click(
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
@@ -616,7 +617,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         inputs=[output_buf, decimation_target, texture_size],
         outputs=[glb_output, download_btn],
     )
-        
+
 
 # Launch the Gradio app
 if __name__ == "__main__":
@@ -630,7 +631,7 @@ if __name__ == "__main__":
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
     pipeline.cuda()
-    
+
     envmap = {
         'forest': EnvMap(torch.tensor(
             cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
@@ -645,5 +646,5 @@ if __name__ == "__main__":
             dtype=torch.float32, device='cuda'
         )),
     }
-    
-    demo.launch(css=css, head=head)
+
+    demo.launch(css=css, head=head, server_name="0.0.0.0", server_port=7860)
