@@ -477,6 +477,7 @@ def extract_glb(
     state: dict,
     decimation_target: int,
     texture_size: int,
+    simplify_method: str,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[str, str]:
@@ -503,6 +504,7 @@ def extract_glb(
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=decimation_target,
+        simplify_method=simplify_method,
         texture_size=texture_size,
         remesh=True,
         remesh_band=1,
@@ -533,6 +535,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
+            simplify_method = gr.Dropdown(["cumesh", "meshlib"], label="Simplify Method", value="cumesh")
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
             generate_btn = gr.Button("Generate")
@@ -550,7 +553,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     shape_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.5, step=0.01)
                     shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     shape_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
-                    max_num_tokens = gr.Slider(10000, 200000, label="Max Number of Tokens", value=50000, step=1000)
+                    max_num_tokens = gr.Slider(10000, 200000, label="Max Number of Tokens", value=49152, step=1000)
                 gr.Markdown("Stage 3: Material Generation")
                 with gr.Row():
                     tex_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=1.0, step=0.1)
@@ -614,7 +617,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size],
+        inputs=[output_buf, decimation_target, texture_size, simplify_method],
         outputs=[glb_output, download_btn],
     )
 

@@ -11,6 +11,38 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
+    current_face_count = len(mesh.faces)
+    if current_face_count <= max_facenum:
+        return mesh
+
+    import meshlib.mrmeshpy as mrmeshpy
+    import meshlib.mrmeshnumpy as mrmeshnumpy
+    import multiprocessing
+
+    # Load mesh
+    mesh_mr = mrmeshnumpy.meshFromFacesVerts(mesh.faces, mesh.vertices)
+
+    faces_to_delete = current_face_count - max_facenum
+    #  Setup simplification parameters
+    mesh_mr.packOptimally()
+    settings = mrmeshpy.DecimateSettings()
+    settings.maxDeletedFaces = faces_to_delete
+    settings.subdivideParts = multiprocessing.cpu_count()
+    # settings.maxError = 0.001
+    settings.packMesh = True
+
+    print(f'Decimating mesh... targeting {max_facenum} faces from {current_face_count} faces')
+    print(f'Decimating mesh... Deleting {faces_to_delete} faces')
+    mrmeshpy.decimateMesh(mesh_mr, settings)
+    print(f'Decimation done. Resulting mesh has {mesh_mr.topology.faceSize()} faces')
+
+    out_verts = mrmeshnumpy.getNumpyVerts(mesh_mr)
+    out_faces = mrmeshnumpy.getNumpyFaces(mesh_mr.topology)
+
+    return trimesh.Trimesh(out_verts, out_faces)
+
+
 def to_glb(
     vertices: torch.Tensor,
     faces: torch.Tensor,
@@ -21,6 +53,7 @@ def to_glb(
     voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
     grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
     decimation_target: int = 1000000,
+    simplify_method: str = 'cumesh',
     texture_size: int = 2048,
     remesh: bool = False,
     remesh_band: float = 1,
@@ -133,7 +166,15 @@ def to_glb(
     # --- Branch 1: Standard Pipeline (Simplification & Cleaning) ---
     if not remesh:
         # Step 1: Aggressive simplification (3x target)
-        mesh.simplify(decimation_target * 3, verbose=verbose)
+        if simplify_method == 'cumesh':
+            mesh.simplify(decimation_target * 3, verbose=verbose)
+        elif simplify_method == 'meshlib':
+             # GPU -> CPU -> Meshlib -> CPU -> GPU
+            v, f = mesh.read()
+            t_mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy())
+            t_mesh = reduce_face_with_meshlib(t_mesh, decimation_target * 3)
+            mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
+
         if verbose:
             print(f"After inital simplification: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         
@@ -146,7 +187,15 @@ def to_glb(
             print(f"After initial cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
             
         # Step 3: Final simplification to target count
-        mesh.simplify(decimation_target, verbose=verbose)
+        if simplify_method == 'cumesh':
+            mesh.simplify(decimation_target, verbose=verbose)
+        elif simplify_method == 'meshlib':
+             # GPU -> CPU -> Meshlib -> CPU -> GPU
+            v, f = mesh.read()
+            t_mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy())
+            t_mesh = reduce_face_with_meshlib(t_mesh, decimation_target)
+            mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
+
         if verbose:
             print(f"After final simplification: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         
@@ -182,7 +231,15 @@ def to_glb(
             print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         
         # Simplify and clean the remeshed result (similar logic to above)
-        mesh.simplify(decimation_target, verbose=verbose)
+        if simplify_method == 'cumesh':
+            mesh.simplify(decimation_target, verbose=verbose)
+        elif simplify_method == 'meshlib':
+             # GPU -> CPU -> Meshlib -> CPU -> GPU
+            v, f = mesh.read()
+            t_mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy())
+            t_mesh = reduce_face_with_meshlib(t_mesh, decimation_target)
+            mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
+
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     
