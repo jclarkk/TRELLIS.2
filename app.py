@@ -486,7 +486,7 @@ def extract_glb(
     texture_size: int,
     remesh_method: str,
     simplify_method: str,
-    texture_extraction: bool,
+    no_texture_gen: bool,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[str, str]:
@@ -501,6 +501,8 @@ def extract_glb(
     Returns:
         str: The path to the extracted GLB file.
     """
+    texture_extraction = not no_texture_gen
+
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
     shape_slat, tex_slat, res = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
@@ -629,13 +631,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         outputs=[output_buf, preview_output],
     )
 
-    texture_extraction = not no_texture_gen
-
     extract_btn.click(
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, texture_extraction],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen],
         outputs=[glb_output, download_btn],
     )
 
