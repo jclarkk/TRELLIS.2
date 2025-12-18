@@ -1,5 +1,6 @@
 from typing import *
 from tqdm import tqdm
+import math
 import numpy as np
 import torch
 import cv2
@@ -59,6 +60,7 @@ def to_glb(
     remesh: bool = False,
     remesh_band: float = 1,
     remesh_project: float = 0.9,
+    remesh_method: str = 'dual_contouring',
     mesh_cluster_threshold_cone_half_angle_rad=np.radians(90.0),
     mesh_cluster_refine_iterations=0,
     mesh_cluster_global_iterations=1,
@@ -213,24 +215,62 @@ def to_glb(
     
     # --- Branch 2: Remeshing Pipeline ---
     else:
-        center = aabb.mean(dim=0)
-        scale = (aabb[1] - aabb[0]).max().item()
-        resolution = grid_size.max().item()
-        
-        # Perform Dual Contouring remeshing (rebuilds topology)
-        mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
-            vertices, faces,
-            center = center,
-            scale = (resolution + 3 * remesh_band) / resolution * scale,
-            resolution = resolution,
-            band = remesh_band,
-            project_back = remesh_project, # Snaps vertices back to original surface
-            verbose = verbose,
-            bvh = bvh,
-        ))
-        if verbose:
-            print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
-        
+        if remesh_method == 'dual_contouring':
+            center = aabb.mean(dim=0)
+            scale = (aabb[1] - aabb[0]).max().item()
+            resolution = grid_size.max().item()
+
+            # Perform Dual Contouring remeshing (rebuilds topology)
+            mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
+                vertices, faces,
+                center = center,
+                scale = (resolution + 3 * remesh_band) / resolution * scale,
+                resolution = resolution,
+                band = remesh_band,
+                project_back = remesh_project,
+                verbose = verbose,
+                bvh = bvh,
+            ))
+            if verbose:
+                print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+        elif remesh_method == 'faithful_contouring':
+            try:
+                from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
+                from atom3d import MeshBVH
+                from atom3d.grid import OctreeIndexer
+            except ImportError:
+                raise ImportError("Faithful Contouring is not installed. Please install it to use faithful_contouring remeshing. See https://github.com/Luo-Yihao/FaithC")
+
+            V = vertices.detach().contiguous().to(device="cuda", dtype=torch.float32)
+            F = faces.detach().contiguous().to(device="cuda", dtype=torch.long)
+
+            max_level = int(math.log2(grid_size.max().item()))
+            min_level = min(4, max(1, max_level - 1))
+
+            bvh = MeshBVH(V, F, device='cuda')
+            octree = OctreeIndexer(max_level=max_level, bounds=bvh.get_bounds(), device='cuda')
+
+            encoder = FCTEncoder(bvh, octree, device='cuda')
+            solver_weights = {
+                'lambda_n': 1.0,
+                'lambda_d': 1e-3,
+                'weight_power': 1
+            }
+            fct_result = encoder.encode(
+                min_level=min_level,
+                solver_weights=solver_weights,
+                compute_flux=True,
+                clamp_anchors=True
+            )
+
+            decoder = FCTDecoder(resolution=grid_size.max().item(), bounds=bvh.get_bounds(), device='cuda')
+            mesh_result = decoder.decode_from_result(fct_result)
+
+            mesh.init(
+                mesh_result.vertices.contiguous(),
+                mesh_result.faces.contiguous().to(torch.int32),
+            )
+
         # Simplify and clean the remeshed result (similar logic to above)
         if simplify_method == 'cumesh':
             mesh.simplify(decimation_target, verbose=verbose)
@@ -260,6 +300,7 @@ def to_glb(
         # Coordinate System Conversion
         vertices_np = mesh.read()[0].cpu().numpy()
         faces_np = mesh.read()[1].cpu().numpy()
+        mesh.compute_vertex_normals()
         normals_np = mesh.read_vertex_normals().cpu().numpy()
         
         # Swap Y and Z axes, invert Y

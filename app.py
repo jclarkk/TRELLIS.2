@@ -326,7 +326,7 @@ def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
     shape_slat, tex_slat, res = latents
     return {
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
-        'tex_slat_feats': tex_slat.feats.cpu().numpy(),
+        'tex_slat_feats': tex_slat.feats.cpu().numpy() if tex_slat is not None else None,
         'coords': shape_slat.coords.cpu().numpy(),
         'res': res,
     }
@@ -337,7 +337,10 @@ def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
         feats=torch.from_numpy(state['shape_slat_feats']).cuda(),
         coords=torch.from_numpy(state['coords']).cuda(),
     )
-    tex_slat = shape_slat.replace(torch.from_numpy(state['tex_slat_feats']).cuda())
+    if state.get('tex_slat_feats') is not None:
+        tex_slat = shape_slat.replace(torch.from_numpy(state['tex_slat_feats']).cuda())
+    else:
+        tex_slat = None
     return shape_slat, tex_slat, state['res']
 
 
@@ -365,6 +368,7 @@ def image_to_3d(
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
     force_high_res_conditional: bool,
+    no_texture_gen: bool,
 
     max_num_tokens: int,
     req: gr.Request,
@@ -402,6 +406,7 @@ def image_to_3d(
         return_latent=True,
         max_num_tokens=max_num_tokens,
         force_high_res_conditional=force_high_res_conditional,
+        no_texture_gen=no_texture_gen,
     )
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
@@ -479,6 +484,7 @@ def extract_glb(
     state: dict,
     decimation_target: int,
     texture_size: int,
+    remesh_method: str,
     simplify_method: str,
     texture_extraction: bool,
     req: gr.Request,
@@ -513,6 +519,7 @@ def extract_glb(
         remesh=True,
         remesh_band=1,
         remesh_project=0,
+        remesh_method=remesh_method,
         use_tqdm=True,
     )
     now = datetime.now()
@@ -538,9 +545,11 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             resolution = gr.Radio(["512", "1024", "1536", "2048"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
+            force_high_res_conditional = gr.Checkbox(label="Force High-Res Conditioning", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
+            remesh_method = gr.Dropdown(["dual_contouring", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
             simplify_method = gr.Dropdown(["cumesh", "meshlib"], label="Simplify Method", value="cumesh")
-            texture_extraction = gr.Checkbox(label="Texture Extraction", value=True)
+            no_texture_gen = gr.Checkbox(label="Skip Texture Generation", value=False)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
             generate_btn = gr.Button("Generate")
@@ -552,7 +561,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     ss_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.7, step=0.01)
                     ss_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     ss_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=5.0, step=0.1)
-                    force_high_res_conditional = gr.Checkbox(label="Force High-Res Conditioning", value=True)
+
                 gr.Markdown("Stage 2: Shape Generation")
                 with gr.Row():
                     shape_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=7.5, step=0.1)
@@ -615,16 +624,18 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
 
-            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, force_high_res_conditional, max_num_tokens,
+            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, force_high_res_conditional, no_texture_gen, max_num_tokens,
         ],
         outputs=[output_buf, preview_output],
     )
+
+    texture_extraction = not no_texture_gen
 
     extract_btn.click(
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, simplify_method, texture_extraction],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, texture_extraction],
         outputs=[glb_output, download_btn],
     )
 

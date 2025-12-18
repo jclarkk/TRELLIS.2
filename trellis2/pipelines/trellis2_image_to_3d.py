@@ -460,8 +460,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
+
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
-        tex_voxels = self.decode_tex_slat(tex_slat, subs)
+        if tex_slat is not None:
+             tex_voxels = self.decode_tex_slat(tex_slat, subs)
+        else:
+             # Create dummy texture voxels
+             tex_voxels = []
+             for sub in subs:
+                 # Standard attributes: White color, Roughness, Alpha
+                 feats = torch.zeros(sub.feats.shape[0], 6, device=sub.device, dtype=torch.float32)
+                 feats[:, 0:3] = 1.0 # White
+                 feats[:, 4:5] = 0.8 # Roughness
+                 feats[:, 5:6] = 1.0 # Alpha
+                 
+                 tex_voxels.append(SparseTensor(coords=sub.coords, feats=feats))
+
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes()
@@ -472,7 +486,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     voxel_size = 1 / resolution,
                     coords = v.coords[:, 1:],
                     attrs = v.feats,
-                    voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
+                    voxel_shape = torch.Size([*v.shape, *v.spatial_shape]) if hasattr(v, 'shape') else None,
                     layout=self.pbr_attr_layout
                 )
             )
@@ -492,6 +506,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline_type: Optional[str] = None,
         max_num_tokens: int = 49152,
         force_high_res_conditional: bool = False,
+        no_texture_gen: bool = False,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -546,20 +561,26 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params
             )
-            tex_slat = self.sample_tex_slat(
-                cond_512, self.models['tex_slat_flow_model_512'],
-                shape_slat, tex_slat_sampler_params
-            )
+            if not no_texture_gen:
+                tex_slat = self.sample_tex_slat(
+                    cond_512, self.models['tex_slat_flow_model_512'],
+                    shape_slat, tex_slat_sampler_params
+                )
+            else:
+                tex_slat = None
             res = 512
         elif pipeline_type == '1024':
             shape_slat = self.sample_shape_slat(
                 cond_1024, self.models['shape_slat_flow_model_1024'],
                 coords, shape_slat_sampler_params
             )
-            tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
-                shape_slat, tex_slat_sampler_params
-            )
+            if not no_texture_gen:
+                tex_slat = self.sample_tex_slat(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params
+                )
+            else:
+                tex_slat = None
             res = 1024
         elif pipeline_type == '1024_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
@@ -569,10 +590,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
-            tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
-                shape_slat, tex_slat_sampler_params
-            )
+            if not no_texture_gen:
+                tex_slat = self.sample_tex_slat(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params
+                )
+            else:
+                tex_slat = None
         elif pipeline_type == '1536_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
@@ -581,10 +605,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
-            tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
-                shape_slat, tex_slat_sampler_params
-            )
+            if not no_texture_gen:
+                tex_slat = self.sample_tex_slat(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params
+                )
+            else:
+                tex_slat = None
         elif pipeline_type == '2048_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
@@ -593,10 +620,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
-            tex_slat = self.sample_tex_slat(
-                cond_1024, self.models['tex_slat_flow_model_1024'],
-                shape_slat, tex_slat_sampler_params
-            )
+            if not no_texture_gen:
+                tex_slat = self.sample_tex_slat(
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
+                    shape_slat, tex_slat_sampler_params
+                )
+            else:
+                tex_slat = None
         torch.cuda.empty_cache()
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
         if return_latent:
