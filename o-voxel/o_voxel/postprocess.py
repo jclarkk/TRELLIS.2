@@ -12,6 +12,9 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+
+
+
 def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
     current_face_count = len(mesh.faces)
     if current_face_count <= max_facenum:
@@ -44,8 +47,172 @@ def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
     return trimesh.Trimesh(out_verts, out_faces)
 
 
+
+def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 2048, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
+    """
+    Identifies visible faces by rendering the mesh from multiple viewpoints.
+    """
+    if verbose:
+        print(f"Computing visibility for {faces.shape[0]} faces using {num_views} views (res {resolution})...")
+
+    device = vertices.device
+    
+    # helper: look_at function
+    def look_at(eye, center, up):
+        z = eye - center
+        z = z / torch.norm(z, dim=-1, keepdim=True)
+        x = torch.cross(up, z)
+        x = x / torch.norm(x, dim=-1, keepdim=True)
+        y = torch.cross(z, x)
+        
+        # Create 4x4 matrices
+        view_mat = torch.eye(4, device=device).unsqueeze(0).repeat(eye.shape[0], 1, 1)
+        view_mat[:, 0, 0:3] = x
+        view_mat[:, 1, 0:3] = y
+        view_mat[:, 2, 0:3] = z
+        view_mat[:, 0, 3] = -torch.sum(x * eye, dim=-1)
+        view_mat[:, 1, 3] = -torch.sum(y * eye, dim=-1)
+        view_mat[:, 2, 3] = -torch.sum(z * eye, dim=-1)
+        
+        return view_mat
+
+    # helper: perspective projection
+    def perspective(fovy, aspect, near, far):
+        f = 1.0 / math.tan(fovy / 2.0)
+        proj_mat = torch.zeros(4, 4, device=device)
+        proj_mat[0, 0] = f / aspect
+        proj_mat[1, 1] = f
+        proj_mat[2, 2] = (far + near) / (near - far)
+        proj_mat[2, 3] = (2.0 * far * near) / (near - far)
+        proj_mat[3, 2] = -1.0
+        return proj_mat
+
+    # 1. Normalize mesh to unit sphere at origin for camera placement
+    v_min = vertices.min(dim=0)[0]
+    v_max = vertices.max(dim=0)[0]
+    center = (v_min + v_max) / 2
+    scale = (v_max - v_min).max()
+    
+    # 2. Generate cameras using Fibonacci sphere
+    indices = torch.arange(0, num_views, dtype=torch.float32, device=device)
+    phi = torch.acos(1 - 2 * (indices + 0.5) / num_views)
+    theta = math.pi * (1 + 5**0.5) * indices
+    
+    x = torch.cos(theta) * torch.sin(phi)
+    y = torch.sin(theta) * torch.sin(phi)
+    z = torch.cos(phi)
+    
+    # Camera positions (radius 2.0 to ensure full view)
+    cam_pos = torch.stack([x, y, z], dim=1) * 2.5
+    
+    # Up vector (standard Y-up)
+    up = torch.tensor([0.0, 1.0, 0.0], device=device).unsqueeze(0).repeat(num_views, 1)
+    
+    # View matrices
+    # We look at the center of the mesh (which we normalized to origin conceptually, 
+    # but let's just transform vertices centered)
+    centered_verts = (vertices - center) / scale
+    
+    view_mats = look_at(cam_pos, torch.zeros_like(cam_pos), up)
+    proj_mat = perspective(math.radians(60), 1.0, 0.1, 10.0).unsqueeze(0).repeat(num_views, 1, 1)
+    mvp_mats = torch.bmm(proj_mat, view_mats)
+    
+    # 3. Rasterize
+    ctx = dr.RasterizeCudaContext()
+    
+    # Prepare vertices: (N, 4) homography
+    verts_hom = torch.cat([centered_verts, torch.ones_like(centered_verts[:, :1])], dim=1)
+    verts_hom = verts_hom.unsqueeze(0).repeat(num_views, 1, 1) # (V, N, 4)
+    
+    # Transform vertices for all views
+    # (V, N, 4) x (V, 4, 4) -> (V, N, 4) ? specific matmul needed
+    # bmm: (B, N, M) x (B, M, P) -> (B, N, P)
+    # We want (V, 4, 4) x (V, 4, N)' -> result transposed?
+    # Easier: (V, N, 4) @ (V, 4, 4).T
+    pos_clip = torch.bmm(verts_hom, mvp_mats.transpose(1, 2))
+    
+    # Rasterize
+    # This might fail OOM if too many views/faces, but we render face indices
+    # We'll batch views if needed, but 64 views 512x512 is small enough usually.
+    # We render face ID + 1 to distinguish from background 0
+    
+    # Prepare faces for int32
+    faces_int = faces.int()
+    
+    visible_faces_mask = torch.zeros(faces.shape[0], dtype=torch.bool, device=device)
+    
+    # Process in batches of views to be safe
+    batch_size = 16
+    for i in range(0, num_views, batch_size):
+        end = min(i + batch_size, num_views)
+        batch_pos = pos_clip[i:end]
+        
+        rast, _ = dr.rasterize(ctx, batch_pos, faces_int, resolution=[resolution, resolution])
+        
+        # rast shape: (B, H, W, 4). The last channel is barycentrics + triangle_id
+        # nvdiffrast: The last channel contains triangle_id + 1.
+        tri_ids = rast[..., 3].int()
+        
+        # Unique visible IDs in this batch
+        unique_ids = torch.unique(tri_ids)
+        
+        # Filter background (0)
+        valid_ids = unique_ids[unique_ids > 0] - 1
+        
+        visible_faces_mask[valid_ids.long()] = True
+        
+    if verbose:
+        print(f"  Initial Pass: Found {visible_faces_mask.sum()} visible faces")
+
+    # 4. Face Padding (Dilation)
+    if face_padding > 0:
+        if verbose:
+            print(f"  Dilating mask by {face_padding} iterations...")
+        
+        # Convert to trimesh for adjacency
+        mesh_cpu = trimesh.Trimesh(
+            vertices=vertices.cpu().numpy(),
+            faces=faces.cpu().numpy(),
+            process=False
+        )
+        
+        adj = mesh_cpu.face_adjacency
+        adj_t = torch.tensor(adj, device=device, dtype=torch.long)
+        
+        # Dilate mask
+        for _ in range(face_padding):
+            # If neighbor is visible, make me visible
+            # Gather status of both faces in adjacency pair
+            mask_a = visible_faces_mask[adj_t[:, 0]]
+            mask_b = visible_faces_mask[adj_t[:, 1]]
+            
+            # Any pair with at least one visible face makes both visible?
+            # Or just propagate existing visibility?
+            # "Add neighbors of currently visible faces"
+            # visible_faces_mask[adj[:, 0]] |= mask_b
+            # visible_faces_mask[adj[:, 1]] |= mask_a
+            
+            # Efficient update:
+            # We want to set mask=True for faces adjacent to a True face.
+            # Identify pairs where one is True. Set both to True.
+            to_add = mask_a | mask_b
+            
+            # Scatter updates
+            # Note: direct indexing with duplicate indices is nondeterministic/racey in some contexts but for ORing boolean it's usually fine
+            # or we can just do it simpler:
+            
+            visible_faces_mask[adj_t[:, 0]] = to_add
+            visible_faces_mask[adj_t[:, 1]] = to_add
+
+    if verbose:
+        print(f"  Final Pass: Found {visible_faces_mask.sum()} visible faces out of {faces.shape[0]}")
+        
+    return visible_faces_mask
+
+
 def to_glb(
     vertices: torch.Tensor,
+
     faces: torch.Tensor,
     attr_volume: torch.Tensor,
     coords: torch.Tensor,
@@ -65,6 +232,7 @@ def to_glb(
     mesh_cluster_refine_iterations=0,
     mesh_cluster_global_iterations=1,
     mesh_cluster_smooth_strength=1,
+    prune_invisible: bool = False,
     verbose: bool = False,
     use_tqdm: bool = False,
 ):
@@ -90,6 +258,7 @@ def to_glb(
         mesh_cluster_refine_iterations: number of iterations for refining clusters in uv unwrapping
         mesh_cluster_global_iterations: number of global iterations for clustering in uv unwrapping
         mesh_cluster_smooth_strength: strength of smoothing for clustering in uv unwrapping
+        prune_invisible: whether to prune invisible faces (inner geometry) before texturing
         verbose: whether to print verbose messages
         use_tqdm: whether to use tqdm to display progress bar
     """
@@ -289,6 +458,32 @@ def to_glb(
     if verbose:
         print("Done")
         
+    # --- Pruning Invisible Faces (New Step) ---
+    if prune_invisible:
+        if use_tqdm:
+            pbar.set_description("Pruning invisible faces")
+        if verbose:
+            print("Pruning invisible faces...", end='', flush=True)
+            
+        v, f = mesh.read()
+        visible_mask = get_visible_faces(v, f, verbose=verbose)
+        
+        # Make sure we don't prune everything if visibility check fails
+        if visible_mask.sum() > 0:
+            visible_faces = f[visible_mask]
+            
+            # Re-init mesh with only visible faces
+            # Note: This might leave unreferenced vertices, but we can clean them
+            mesh.init(v, visible_faces)
+
+            if verbose:
+                print(f" -> {mesh.num_faces} faces remaining")
+
+            # Restore to required face count
+            mesh.simplify(decimation_target, verbose=verbose)
+        else:
+            print("Warning: Visibility pruning removed all faces! Skipping pruning to be safe.")
+
     
     # --- UV Parameterization ---
     if not texture_extraction:
@@ -404,7 +599,7 @@ def to_glb(
     roughness = np.clip(attrs[..., attr_layout['roughness']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     alpha = np.clip(attrs[..., attr_layout['alpha']].cpu().numpy() * 255, 0, 255).astype(np.uint8)
     alpha_mode = 'OPAQUE'
-    
+
     # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
     mask_inv = (~mask).astype(np.uint8)
     base_color = cv2.inpaint(base_color, mask_inv, 3, cv2.INPAINT_TELEA)

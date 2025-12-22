@@ -505,7 +505,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         return_latent: bool = False,
         pipeline_type: Optional[str] = None,
         max_num_tokens: int = 49152,
-        force_high_res_conditional: bool = False,
         no_texture_gen: bool = False,
     ) -> List[MeshWithVoxel]:
         """
@@ -549,7 +548,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if preprocess_image:
             image = self.preprocess_image(image)
         torch.manual_seed(seed)
-        cond_512 = self.get_cond([image], 1024 if force_high_res_conditional else 512)
+        cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32, '2048_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(

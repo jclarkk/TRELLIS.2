@@ -367,7 +367,6 @@ def image_to_3d(
     tex_slat_guidance_rescale: float,
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
-    force_high_res_conditional: bool,
     no_texture_gen: bool,
 
     max_num_tokens: int,
@@ -405,7 +404,6 @@ def image_to_3d(
         }[resolution],
         return_latent=True,
         max_num_tokens=max_num_tokens,
-        force_high_res_conditional=force_high_res_conditional,
         no_texture_gen=no_texture_gen,
     )
     mesh = outputs[0]
@@ -487,6 +485,7 @@ def extract_glb(
     remesh_method: str,
     simplify_method: str,
     no_texture_gen: bool,
+    prune_invisible_faces: bool,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[str, str]:
@@ -522,6 +521,7 @@ def extract_glb(
         remesh_band=1,
         remesh_project=0,
         remesh_method=remesh_method,
+        prune_invisible=prune_invisible_faces,
         use_tqdm=True,
     )
     now = datetime.now()
@@ -547,10 +547,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             resolution = gr.Radio(["512", "1024", "1536", "2048"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
-            force_high_res_conditional = gr.Checkbox(label="Force High-Res Conditioning", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             remesh_method = gr.Dropdown(["dual_contouring", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
             simplify_method = gr.Dropdown(["cumesh", "meshlib"], label="Simplify Method", value="cumesh")
+            prune_invisible_faces = gr.Checkbox(label="Prune Invisible Faces", value=True)
             no_texture_gen = gr.Checkbox(label="Skip Texture Generation", value=False)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
@@ -626,7 +626,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
 
-            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, force_high_res_conditional, no_texture_gen, max_num_tokens,
+            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, no_texture_gen, max_num_tokens,
         ],
         outputs=[output_buf, preview_output],
     )
@@ -635,7 +635,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen, prune_invisible_faces],
         outputs=[glb_output, download_btn],
     )
 
