@@ -404,7 +404,7 @@ def to_glb(
                 print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         elif remesh_method == 'faithful_contouring':
             try:
-                from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
+                # from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
                 from atom3d import MeshBVH
                 from atom3d.grid import OctreeIndexer
             except ImportError:
@@ -419,20 +419,6 @@ def to_glb(
             bvh = MeshBVH(V, F, device='cuda')
             octree = OctreeIndexer(max_level=max_level, bounds=bvh.get_bounds(), device='cuda')
 
-            encoder = FCTEncoder(bvh, octree, device='cuda')
-            solver_weights = {
-                'lambda_n': 1.0,
-                'lambda_d': 1e-3,
-                'weight_power': 1
-            }
-            fct_result = encoder.encode(
-                min_level=min_level,
-                solver_weights=solver_weights,
-                compute_flux=True,
-                clamp_anchors=True
-            )
-
-            decoder = FCTDecoder(resolution=grid_size.max().item(), bounds=bvh.get_bounds(), device='cuda')
             mesh_result = decoder.decode_from_result(fct_result)
 
             mesh.init(
