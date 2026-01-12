@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--randomize_seed", action="store_true", help="Randomize seed")
     parser.add_argument("--resolution", type=str, default="1024", choices=["512", "1024", "1536", "2048"], help="Generation resolution")
     parser.add_argument("--no_texture_gen", action="store_true", help="Skip texture generation")
+    parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
     parser.add_argument("--max_num_tokens", type=int, default=49152, help="Max number of tokens")
 
     # Stage 1: Sparse Structure
@@ -129,6 +130,7 @@ def main():
         remesh_method=args.remesh_method,
         prune_invisible=args.prune_invisible_faces,
         use_tqdm=True,
+        no_pbr=args.no_pbr,
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)

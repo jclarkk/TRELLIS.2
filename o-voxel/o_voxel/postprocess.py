@@ -235,6 +235,7 @@ def to_glb(
     prune_invisible: bool = False,
     verbose: bool = False,
     use_tqdm: bool = False,
+    no_pbr: bool = False,
 ):
     """
     Convert an extracted mesh to a GLB file.
@@ -595,15 +596,23 @@ def to_glb(
     
     # Create PBR material
     # Standard PBR packs Metallic and Roughness into Blue and Green channels
-    material = trimesh.visual.material.PBRMaterial(
-        baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
-        baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
-        metallicRoughnessTexture=Image.fromarray(np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)),
-        metallicFactor=1.0,
-        roughnessFactor=1.0,
-        alphaMode=alpha_mode,
-        doubleSided=True if not remesh else False,
-    )
+    if no_pbr:
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
+            baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
+            alphaMode=alpha_mode,
+            doubleSided=True if not remesh else False,
+        )
+    else:
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
+            baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
+            metallicRoughnessTexture=Image.fromarray(np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)),
+            metallicFactor=1.0,
+            roughnessFactor=1.0,
+            alphaMode=alpha_mode,
+            doubleSided=True if not remesh else False,
+        )
     
     # --- Coordinate System Conversion & Final Object ---
     vertices_np = out_vertices.cpu().numpy()
