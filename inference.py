@@ -1,15 +1,14 @@
 import argparse
 import os
+import time
 
 # Set environment variables relative to app.py configuration
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import torch
 import numpy as np
 from PIL import Image
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils
 import o_voxel
 
 def parse_args():
@@ -57,11 +56,16 @@ def main():
 
     # Seed
     seed = np.random.randint(0, np.iinfo(np.int32).max) if args.randomize_seed else args.seed
+
+    t0 = time.time()
     
     # Load Pipeline
     print(f"Loading pipeline (Texture Models: {not args.no_texture_gen})...")
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B', load_texture_models=not args.no_texture_gen)
     pipeline.cuda()
+
+    t1 = time.time()
+    print(f"Pipeline loaded in {t1 - t0:.2f} seconds.")
 
     # Load and Preprocess Images
     images = []
@@ -70,6 +74,9 @@ def main():
         img = Image.open(img_path)
         img = pipeline.preprocess_image(img)
         images.append(img)
+
+    t2 = time.time()
+    print(f"Images preprocessed in {t2 - t1:.2f} seconds")
 
     # Run Pipeline
     print("Running generation...")
@@ -106,6 +113,9 @@ def main():
         no_texture_gen=args.no_texture_gen,
     )
 
+    t3 = time.time()
+    print(f"Pipeline execution completed in {t3 - t2:.2f} seconds")
+
     # Extract GLB
     print("Extracting GLB...")
     shape_slat, tex_slat, res = latents
@@ -132,6 +142,9 @@ def main():
         use_tqdm=True,
         no_pbr=args.no_pbr,
     )
+
+    t4 = time.time()
+    print(f"GLB extracted in {t4 - t3:.2f} seconds")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     glb.export(args.output, extension_webp=True)
