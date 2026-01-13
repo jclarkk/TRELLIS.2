@@ -82,7 +82,11 @@ def from_pretrained(path: str, **kwargs):
     with no_init():
         model = __getattr__(config['name'])(**config['args'], **kwargs)
     
-    model.load_state_dict(load_file(model_file), strict=False)
+    try:
+        model.load_state_dict(load_file(model_file), strict=False, assign=True)
+    except TypeError:
+        # Fallback for older PyTorch versions that don't support assign=True
+        model.load_state_dict(load_file(model_file), strict=False)
 
     return model
 
