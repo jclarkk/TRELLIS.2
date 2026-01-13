@@ -52,7 +52,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         tex_slat_normalization: dict = None,
         image_cond_model: Callable = None,
         rembg_model: Callable = None,
-        low_vram: bool = True,
+        low_vram: bool = False,
         default_pipeline_type: str = '1024_cascade',
     ):
         if models is None:
@@ -141,7 +141,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
         
-        pipeline.low_vram = args.get('low_vram', True)
+        pipeline.low_vram = args.get('low_vram', False)
         pipeline.default_pipeline_type = args.get('default_pipeline_type', '1024_cascade')
         pipeline.pbr_attr_layout = {
             'base_color': slice(0, 3),

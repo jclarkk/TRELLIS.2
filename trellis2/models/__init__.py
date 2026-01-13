@@ -82,18 +82,7 @@ def from_pretrained(path: str, **kwargs):
     with no_init():
         model = __getattr__(config['name'])(**config['args'], **kwargs)
     
-    state_dict = load_file(model_file)
-    try:
-        model.load_state_dict(state_dict, strict=False, assign=True)
-    except Exception as e:
-        # Fallback for older PyTorch versions or if assign=True fails
-        # If parameters are on meta device, we need to materialize them first
-        is_meta = any(p.device.type == 'meta' for p in model.parameters())
-        if is_meta:
-            print(f"[WARNING] Model initialized on meta device. Materializing to CPU before loading. Error with assign=True: {e}")
-            model.to_empty(device='cpu')
-        
-        model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(load_file(model_file), strict=False)
 
     return model
 
