@@ -86,16 +86,44 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Args:
             path (str): The path to the model. Can be either local path or a Hugging Face repository.
         """
+        import concurrent.futures
+        import json
+        import os
+        from huggingface_hub import hf_hub_download
+
+        # Pre-load config to get args
+        _config_file = config_file
+        is_local = os.path.exists(f"{path}/{_config_file}")
+        if is_local:
+            _config_path = f"{path}/{_config_file}"
+        else:
+            _config_path = hf_hub_download(path, _config_file)
+        
+        with open(_config_path, 'r') as f:
+            args = json.load(f)['args']
+
         if not load_texture_models:
             ignore_models = [
                 'tex_slat_flow_model_512',
                 'tex_slat_flow_model_1024',
                 'tex_slat_decoder',
             ]
-            pipeline = super().from_pretrained(path, config_file=config_file, ignore_models=ignore_models)
         else:
-            pipeline = super().from_pretrained(path, config_file)
-        args = pipeline._pretrained_args
+            ignore_models = None
+
+        # Limit workers to 2 since we only have 2 main tasks concurrently here (pipeline + image_cond).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            pipeline_future = executor.submit(super().from_pretrained, path, config_file=config_file, ignore_models=ignore_models)
+            
+            def load_image_cond_model():
+                return getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
+
+            image_cond_future = executor.submit(load_image_cond_model)
+            
+            pipeline = pipeline_future.result()
+            pipeline.image_cond_model = image_cond_future.result()
+
+        pipeline._pretrained_args = args # Ensure args are set correctly if super didn't or if we shadowed it (super sets it)
 
         pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(**args['sparse_structure_sampler']['args'])
         pipeline.sparse_structure_sampler_params = args['sparse_structure_sampler']['params']
@@ -111,7 +139,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if load_texture_models:
             pipeline.tex_slat_normalization = args['tex_slat_normalization']
 
-        pipeline.image_cond_model = getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
         
         pipeline.low_vram = args.get('low_vram', True)
