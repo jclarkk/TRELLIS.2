@@ -86,7 +86,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Args:
             path (str): The path to the model. Can be either local path or a Hugging Face repository.
         """
-        pipeline = super().from_pretrained(path, config_file)
+        if not load_texture_models:
+            ignore_models = [
+                'tex_slat_flow_model_512',
+                'tex_slat_flow_model_1024',
+                'tex_slat_decoder',
+            ]
+            pipeline = super().from_pretrained(path, config_file=config_file, ignore_models=ignore_models)
+        else:
+            pipeline = super().from_pretrained(path, config_file)
         args = pipeline._pretrained_args
 
         pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(**args['sparse_structure_sampler']['args'])
@@ -94,16 +102,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
         pipeline.shape_slat_sampler = getattr(samplers, args['shape_slat_sampler']['name'])(**args['shape_slat_sampler']['args'])
         pipeline.shape_slat_sampler_params = args['shape_slat_sampler']['params']
-        pipeline.shape_slat_normalization = args['shape_slat_normalization']
 
         if load_texture_models:
             pipeline.tex_slat_sampler = getattr(samplers, args['tex_slat_sampler']['name'])(**args['tex_slat_sampler']['args'])
             pipeline.tex_slat_sampler_params = args['tex_slat_sampler']['params']
+        
+        pipeline.shape_slat_normalization = args['shape_slat_normalization']
+        if load_texture_models:
             pipeline.tex_slat_normalization = args['tex_slat_normalization']
-        else:
-            pipeline.tex_slat_sampler = None
-            pipeline.tex_slat_sampler_params = {}
-            pipeline.tex_slat_normalization = None
 
         pipeline.image_cond_model = getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
@@ -477,33 +483,32 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
-
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         if tex_slat is not None:
-             tex_voxels = self.decode_tex_slat(tex_slat, subs)
+            tex_voxels = self.decode_tex_slat(tex_slat, subs)
         else:
-             # Create dummy texture voxels
-             tex_voxels = []
-             for sub in subs:
-                 # Standard attributes: White color, Roughness, Alpha
-                 feats = torch.zeros(sub.feats.shape[0], 6, device=sub.device, dtype=torch.float32)
-                 feats[:, 0:3] = 1.0 # White
-                 feats[:, 4:5] = 0.8 # Roughness
-                 feats[:, 5:6] = 1.0 # Alpha
-
-                 tex_voxels.append(SparseTensor(coords=sub.coords, feats=feats))
-
+            tex_voxels = [None] * len(meshes)
+            
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes()
+            if v is not None:
+                coords = v.coords[:, 1:]
+                attrs = v.feats
+                voxel_shape = torch.Size([*v.shape, *v.spatial_shape])
+            else:
+                coords = None
+                attrs = None
+                voxel_shape = None
+                
             out_mesh.append(
                 MeshWithVoxel(
                     m.vertices, m.faces,
                     origin = [-0.5, -0.5, -0.5],
                     voxel_size = 1 / resolution,
-                    coords = v.coords[:, 1:],
-                    attrs = v.feats,
-                    voxel_shape = torch.Size([*v.shape, *v.spatial_shape]) if hasattr(v, 'shape') else None,
+                    coords = coords,
+                    attrs = attrs,
+                    voxel_shape = voxel_shape,
                     layout=self.pbr_attr_layout
                 )
             )
@@ -552,14 +557,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         elif pipeline_type == '1024_cascade':
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             assert 'shape_slat_flow_model_1024' in self.models, "No 1024 resolution shape SLat flow model found."
-            if not no_texture_gen:
-                assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
-        elif pipeline_type == '1536_cascade':
-            assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             assert 'shape_slat_flow_model_1024' in self.models, "No 1024 resolution shape SLat flow model found."
             if not no_texture_gen:
                 assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
-        elif pipeline_type == '2048_cascade':
+        elif pipeline_type == '1536_cascade':
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             assert 'shape_slat_flow_model_1024' in self.models, "No 1024 resolution shape SLat flow model found."
             if not no_texture_gen:
@@ -626,21 +627,6 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_512, cond_1024,
                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
                 512, 1536,
-                coords, shape_slat_sampler_params,
-                max_num_tokens
-            )
-            if not no_texture_gen:
-                tex_slat = self.sample_tex_slat(
-                    cond_1024, self.models['tex_slat_flow_model_1024'],
-                    shape_slat, tex_slat_sampler_params
-                )
-            else:
-                tex_slat = None
-        elif pipeline_type == '2048_cascade':
-            shape_slat, res = self.sample_shape_slat_cascade(
-                cond_512, cond_1024,
-                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
-                512, 2048,
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
