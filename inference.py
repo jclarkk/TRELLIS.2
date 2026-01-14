@@ -2,6 +2,8 @@ import argparse
 import os
 import time
 
+import torch
+
 # Set environment variables relative to app.py configuration
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -22,6 +24,7 @@ def parse_args():
     parser.add_argument("--resolution", type=str, default="1024", choices=["512", "1024", "1536", "2048"], help="Generation resolution")
     parser.add_argument("--no_texture_gen", action="store_true", help="Skip texture generation")
     parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
+    parser.add_argument("--webp", action="store_true", help="Use WEBP for texture compression in GLB")
     parser.add_argument("--max_num_tokens", type=int, default=49152, help="Max number of tokens")
 
     parser.add_argument("--low_vram", action="store_true", help="Enable low VRAM mode")
@@ -122,6 +125,10 @@ def main():
     print("Extracting GLB...")
     shape_slat, tex_slat, res = latents
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+    attr_layout = pipeline.pbr_attr_layout
+
+    del pipeline
+    torch.cuda.empty_cache()
     
     # Prune config
     glb = o_voxel.postprocess.to_glb(
@@ -129,7 +136,7 @@ def main():
         faces=mesh.faces,
         attr_volume=mesh.attrs,
         coords=mesh.coords,
-        attr_layout=pipeline.pbr_attr_layout,
+        attr_layout=attr_layout,
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=args.decimation_target,
@@ -149,7 +156,7 @@ def main():
     print(f"GLB extracted in {t4 - t3:.2f} seconds")
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    glb.export(args.output, extension_webp=True)
+    glb.export(args.output, extension_webp=args.webp)
     print(f"Saved GLB to {args.output}")
 
 if __name__ == "__main__":
