@@ -24,6 +24,8 @@ def parse_args():
     parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
     parser.add_argument("--max_num_tokens", type=int, default=49152, help="Max number of tokens")
 
+    parser.add_argument("--low_vram", action="store_true", help="Enable low VRAM mode")
+
     # Stage 1: Sparse Structure
     parser.add_argument("--ss_guidance_strength", type=float, default=7.5)
     parser.add_argument("--ss_guidance_rescale", type=float, default=0.7)
@@ -61,7 +63,7 @@ def main():
     
     # Load Pipeline
     print(f"Loading pipeline (Texture Models: {not args.no_texture_gen})...")
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B', load_texture_models=not args.no_texture_gen)
+    pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B', load_texture_models=not args.no_texture_gen, low_vram=args.low_vram)
     pipeline.cuda()
 
     t1 = time.time()

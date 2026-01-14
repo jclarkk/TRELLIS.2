@@ -36,30 +36,20 @@ class Pipeline:
         with open(config_file, 'r') as f:
             args = json.load(f)['args']
 
-        import concurrent.futures
-
         _models = {}
         if ignore_models is None:
             ignore_models = []
 
-        def load_model(k, v):
+        _models = {}
+        for k, v in args['models'].items():
             if k in ignore_models:
-                return None
+                continue
             if hasattr(cls, 'model_names_to_load') and k not in cls.model_names_to_load:
-                return None
+                continue
             try:
-                return k, models.from_pretrained(f"{path}/{v}")
+                _models[k] = models.from_pretrained(f"{path}/{v}")
             except Exception as e:
-                return k, models.from_pretrained(v)
-
-        # Limit workers to avoid I/O or CPU contention. 
-        # 6 workers to cover the 5 main heavy models + potential overheads, assuming skip_init reduces memory pressure.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            futures = [executor.submit(load_model, k, v) for k, v in args['models'].items()]
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    _models[result[0]] = result[1]
+                _models[k] = models.from_pretrained(v)
 
         new_pipeline = cls(_models)
         new_pipeline._pretrained_args = args

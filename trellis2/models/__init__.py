@@ -1,16 +1,15 @@
 import importlib
-import torch
 
 __attributes = {
     # Sparse Structure
     'SparseStructureEncoder': 'sparse_structure_vae',
     'SparseStructureDecoder': 'sparse_structure_vae',
     'SparseStructureFlowModel': 'sparse_structure_flow',
-    
+
     # SLat Generation
     'SLatFlowModel': 'structured_latent_flow',
     'ElasticSLatFlowModel': 'structured_latent_flow',
-    
+
     # SC-VAEs
     'SparseUnetVaeEncoder': 'sc_vaes.sparse_unet_vae',
     'SparseUnetVaeDecoder': 'sc_vaes.sparse_unet_vae',
@@ -21,6 +20,7 @@ __attributes = {
 __submodules = []
 
 __all__ = list(__attributes.keys()) + __submodules
+
 
 def __getattr__(name):
     if name not in globals():
@@ -63,25 +63,7 @@ def from_pretrained(path: str, **kwargs):
 
     with open(config_file, 'r') as f:
         config = json.load(f)
-    
-    # Context manager to skip initialization
-    class no_init:
-        def __enter__(self):
-            def skip_init(module, *args, **kwargs):
-                pass
-            self.original_inits = {}
-            for name in ['normal_', 'uniform_', 'constant_', 'xavier_normal_', 'xavier_uniform_', 'kaiming_normal_', 'kaiming_uniform_', 'zeros_', 'ones_', 'eye_', 'dirac_', 'orthogonal_']:
-                if hasattr(torch.nn.init, name):
-                    self.original_inits[name] = getattr(torch.nn.init, name)
-                    setattr(torch.nn.init, name, skip_init)
-        
-        def __exit__(self, exc_type, exc_value, traceback):
-            for name, func in self.original_inits.items():
-                setattr(torch.nn.init, name, func)
-
-    with no_init():
-        model = __getattr__(config['name'])(**config['args'], **kwargs)
-    
+    model = __getattr__(config['name'])(**config['args'], **kwargs)
     model.load_state_dict(load_file(model_file), strict=False)
 
     return model
@@ -92,6 +74,6 @@ if __name__ == '__main__':
     from .sparse_structure_vae import SparseStructureEncoder, SparseStructureDecoder
     from .sparse_structure_flow import SparseStructureFlowModel
     from .structured_latent_flow import SLatFlowModel, ElasticSLatFlowModel
-        
+
     from .sc_vaes.sparse_unet_vae import SparseUnetVaeEncoder, SparseUnetVaeDecoder
     from .sc_vaes.fdg_vae import FlexiDualGridVaeEncoder, FlexiDualGridVaeDecoder

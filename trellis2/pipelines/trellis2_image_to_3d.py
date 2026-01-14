@@ -40,20 +40,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     ]
 
     def __init__(
-        self,
-        models: dict[str, nn.Module] = None,
-        sparse_structure_sampler: samplers.Sampler = None,
-        shape_slat_sampler: samplers.Sampler = None,
-        tex_slat_sampler: samplers.Sampler = None,
-        sparse_structure_sampler_params: dict = None,
-        shape_slat_sampler_params: dict = None,
-        tex_slat_sampler_params: dict = None,
-        shape_slat_normalization: dict = None,
-        tex_slat_normalization: dict = None,
-        image_cond_model: Callable = None,
-        rembg_model: Callable = None,
-        low_vram: bool = False,
-        default_pipeline_type: str = '1024_cascade',
+            self,
+            models: dict[str, nn.Module] = None,
+            sparse_structure_sampler: samplers.Sampler = None,
+            shape_slat_sampler: samplers.Sampler = None,
+            tex_slat_sampler: samplers.Sampler = None,
+            sparse_structure_sampler_params: dict = None,
+            shape_slat_sampler_params: dict = None,
+            tex_slat_sampler_params: dict = None,
+            shape_slat_normalization: dict = None,
+            tex_slat_normalization: dict = None,
+            image_cond_model: Callable = None,
+            rembg_model: Callable = None,
+            low_vram: bool = True,
+            default_pipeline_type: str = '1024_cascade',
     ):
         if models is None:
             return
@@ -79,69 +79,47 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self._device = 'cpu'
 
     @classmethod
-    def from_pretrained(cls, path: str, config_file: str = "pipeline.json", load_texture_models: bool = True) -> "Trellis2ImageTo3DPipeline":
+    def from_pretrained(cls, path: str, config_file: str = "pipeline.json",
+                        load_texture_models: bool = True, low_vram: bool = True) -> "Trellis2ImageTo3DPipeline":
         """
         Load a pretrained model.
 
         Args:
             path (str): The path to the model. Can be either local path or a Hugging Face repository.
         """
-        import concurrent.futures
-        import json
-        import os
-        from huggingface_hub import hf_hub_download
-
-        # Pre-load config to get args
-        _config_file = config_file
-        is_local = os.path.exists(f"{path}/{_config_file}")
-        if is_local:
-            _config_path = f"{path}/{_config_file}"
-        else:
-            _config_path = hf_hub_download(path, _config_file)
-        
-        with open(_config_path, 'r') as f:
-            args = json.load(f)['args']
-
         if not load_texture_models:
             ignore_models = [
                 'tex_slat_flow_model_512',
                 'tex_slat_flow_model_1024',
                 'tex_slat_decoder',
             ]
+            pipeline = super().from_pretrained(path, config_file=config_file, ignore_models=ignore_models)
         else:
-            ignore_models = None
+            pipeline = super().from_pretrained(path, config_file)
+        args = pipeline._pretrained_args
 
-        # Limit workers to 2 since we only have 2 main tasks concurrently here (pipeline + image_cond).
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            pipeline_future = executor.submit(super().from_pretrained, path, config_file=config_file, ignore_models=ignore_models)
-            
-            def load_image_cond_model():
-                return getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
-
-            image_cond_future = executor.submit(load_image_cond_model)
-            
-            pipeline = pipeline_future.result()
-            pipeline.image_cond_model = image_cond_future.result()
-
-        pipeline._pretrained_args = args # Ensure args are set correctly if super didn't or if we shadowed it (super sets it)
-
-        pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(**args['sparse_structure_sampler']['args'])
+        pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(
+            **args['sparse_structure_sampler']['args'])
         pipeline.sparse_structure_sampler_params = args['sparse_structure_sampler']['params']
 
-        pipeline.shape_slat_sampler = getattr(samplers, args['shape_slat_sampler']['name'])(**args['shape_slat_sampler']['args'])
+        pipeline.shape_slat_sampler = getattr(samplers, args['shape_slat_sampler']['name'])(
+            **args['shape_slat_sampler']['args'])
         pipeline.shape_slat_sampler_params = args['shape_slat_sampler']['params']
 
         if load_texture_models:
-            pipeline.tex_slat_sampler = getattr(samplers, args['tex_slat_sampler']['name'])(**args['tex_slat_sampler']['args'])
+            pipeline.tex_slat_sampler = getattr(samplers, args['tex_slat_sampler']['name'])(
+                **args['tex_slat_sampler']['args'])
             pipeline.tex_slat_sampler_params = args['tex_slat_sampler']['params']
-        
+
         pipeline.shape_slat_normalization = args['shape_slat_normalization']
         if load_texture_models:
             pipeline.tex_slat_normalization = args['tex_slat_normalization']
 
+        pipeline.image_cond_model = getattr(image_feature_extractor, args['image_cond_model']['name'])(
+            **args['image_cond_model']['args'])
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
-        
-        pipeline.low_vram = args.get('low_vram', False)
+
+        pipeline.low_vram = low_vram
         pipeline.default_pipeline_type = args.get('default_pipeline_type', '1024_cascade')
         pipeline.pbr_attr_layout = {
             'base_color': slice(0, 3),
@@ -197,8 +175,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output
-        
-    def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
+
+    def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int,
+                 include_neg_cond: bool = True) -> dict:
         """
         Get the conditioning information for the model.
 
@@ -229,15 +208,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         }
 
     def sample_sparse_structure(
-        self,
-        cond: dict,
-        resolution: int,
-        num_samples: int = 1,
-        sampler_params: dict = {},
+            self,
+            cond: dict,
+            resolution: int,
+            num_samples: int = 1,
+            sampler_params: dict = {},
     ) -> torch.Tensor:
         """
         Sample sparse structures with the given conditioning.
-        
+
         Args:
             cond (dict): The conditioning information.
             resolution (int): The resolution of the sparse structure.
@@ -262,12 +241,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ).samples
         if self.low_vram:
             flow_model.cpu()
-        
+
         # Decode sparse structure latent
         decoder = self.models['sparse_structure_decoder']
         if self.low_vram:
             decoder.to(self.device)
-        decoded = decoder(z_s)>0
+        decoded = decoder(z_s) > 0
         if self.low_vram:
             decoder.cpu()
         if resolution != decoded.shape[2]:
@@ -278,15 +257,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         return coords
 
     def sample_shape_slat(
-        self,
-        cond: dict,
-        flow_model,
-        coords: torch.Tensor,
-        sampler_params: dict = {},
+            self,
+            cond: dict,
+            flow_model,
+            coords: torch.Tensor,
+            sampler_params: dict = {},
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
-        
+
         Args:
             cond (dict): The conditioning information.
             coords (torch.Tensor): The coordinates of the sparse structure.
@@ -314,24 +293,24 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat
-    
+
     def sample_shape_slat_cascade(
-        self,
-        lr_cond: dict,
-        cond: dict,
-        flow_model_lr,
-        flow_model,
-        lr_resolution: int,
-        resolution: int,
-        coords: torch.Tensor,
-        sampler_params: dict = {},
-        max_num_tokens: int = 49152,
+            self,
+            lr_cond: dict,
+            cond: dict,
+            flow_model_lr,
+            flow_model,
+            lr_resolution: int,
+            resolution: int,
+            coords: torch.Tensor,
+            sampler_params: dict = {},
+            max_num_tokens: int = 49152,
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
-        
+
         Args:
             cond (dict): The conditioning information.
             coords (torch.Tensor): The coordinates of the sparse structure.
@@ -358,7 +337,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         # Upsample
         if self.low_vram:
             self.models['shape_slat_decoder'].to(self.device)
@@ -380,7 +359,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                     print(f"Due to the limited number of tokens, the resolution is reduced to {hr_resolution}.")
                 break
             hr_resolution -= 128
-        
+
         # Sample structured latent
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
@@ -403,13 +382,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat, hr_resolution
 
     def decode_shape_slat(
-        self,
-        slat: SparseTensor,
-        resolution: int,
+            self,
+            slat: SparseTensor,
+            resolution: int,
     ) -> Tuple[List[Mesh], List[SparseTensor]]:
         """
         Decode the structured latent.
@@ -430,17 +409,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
         return ret
-    
+
     def sample_tex_slat(
-        self,
-        cond: dict,
-        flow_model,
-        shape_slat: SparseTensor,
-        sampler_params: dict = {},
+            self,
+            cond: dict,
+            flow_model,
+            shape_slat: SparseTensor,
+            sampler_params: dict = {},
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
-        
+
         Args:
             cond (dict): The conditioning information.
             shape_slat (SparseTensor): The structured latent for shape
@@ -452,7 +431,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         shape_slat = (shape_slat - mean) / std
 
         in_channels = flow_model.in_channels if isinstance(flow_model, nn.Module) else flow_model[0].in_channels
-        noise = shape_slat.replace(feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
+        noise = shape_slat.replace(
+            feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
@@ -471,13 +451,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat
 
     def decode_tex_slat(
-        self,
-        slat: SparseTensor,
-        subs: List[SparseTensor],
+            self,
+            slat: SparseTensor,
+            subs: List[SparseTensor],
     ) -> SparseTensor:
         """
         Decode the structured latent.
@@ -494,13 +474,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             self.models['tex_slat_decoder'].cpu()
         return ret
-    
+
     @torch.no_grad()
     def decode_latent(
-        self,
-        shape_slat: SparseTensor,
-        tex_slat: SparseTensor,
-        resolution: int,
+            self,
+            shape_slat: SparseTensor,
+            tex_slat: SparseTensor,
+            resolution: int,
     ) -> List[MeshWithVoxel]:
         """
         Decode the latent codes.
@@ -515,7 +495,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_voxels = self.decode_tex_slat(tex_slat, subs)
         else:
             tex_voxels = [None] * len(meshes)
-            
+
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes()
@@ -527,34 +507,34 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords = None
                 attrs = None
                 voxel_shape = None
-                
+
             out_mesh.append(
                 MeshWithVoxel(
                     m.vertices, m.faces,
-                    origin = [-0.5, -0.5, -0.5],
-                    voxel_size = 1 / resolution,
-                    coords = coords,
-                    attrs = attrs,
-                    voxel_shape = voxel_shape,
+                    origin=[-0.5, -0.5, -0.5],
+                    voxel_size=1 / resolution,
+                    coords=coords,
+                    attrs=attrs,
+                    voxel_shape=voxel_shape,
                     layout=self.pbr_attr_layout
                 )
             )
         return out_mesh
-    
+
     @torch.no_grad()
     def run(
-        self,
-        image: Union[Image.Image, List[Image.Image]],
-        num_samples: int = 1,
-        seed: int = 42,
-        sparse_structure_sampler_params: dict = {},
-        shape_slat_sampler_params: dict = {},
-        tex_slat_sampler_params: dict = {},
-        preprocess_image: bool = True,
-        return_latent: bool = False,
-        pipeline_type: Optional[str] = None,
-        max_num_tokens: int = 49152,
-        no_texture_gen: bool = False,
+            self,
+            image: Union[Image.Image, List[Image.Image]],
+            num_samples: int = 1,
+            seed: int = 42,
+            sparse_structure_sampler_params: dict = {},
+            shape_slat_sampler_params: dict = {},
+            tex_slat_sampler_params: dict = {},
+            preprocess_image: bool = True,
+            return_latent: bool = False,
+            pipeline_type: Optional[str] = None,
+            max_num_tokens: int = 49152,
+            no_texture_gen: bool = False,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -594,7 +574,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
-        
+
         # Normalize to list of images
         images = image if isinstance(image, list) else [image]
 
