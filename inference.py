@@ -21,7 +21,7 @@ def parse_args():
     # Model and Generation Settings
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--randomize_seed", action="store_true", help="Randomize seed")
-    parser.add_argument("--resolution", type=str, default="1024", choices=["512", "1024", "1536", "2048"], help="Generation resolution")
+    parser.add_argument("--resolution", type=str, default="1024", choices=["512", "1024", "1024_cascade", "1536", "2048"], help="Generation resolution")
     parser.add_argument("--no_texture_gen", action="store_true", help="Skip texture generation")
     parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
     parser.add_argument("--webp", action="store_true", help="Use WEBP for texture compression in GLB")
@@ -52,7 +52,12 @@ def parse_args():
     parser.add_argument("--texture_size", type=int, default=2048, choices=[1024, 2048, 4096], help="Texture size")
     parser.add_argument("--remesh_method", type=str, default="dual_contouring", choices=["dual_contouring", "faithful_contouring", "none"], help="Remesh method")
     parser.add_argument("--simplify_method", type=str, default="cumesh", choices=["cumesh", "meshlib"], help="Simplify method")
-    parser.add_argument("--prune_invisible_faces", type=bool, default=True, help="Prune invisible faces")
+    parser.add_argument("--repair_method", type=str, default="cumesh", choices=["cumesh", "meshlib"], help="Repair method (hole filling)")
+    parser.add_argument("--fill_holes_max_perimeter", type=float, default=0.03, help="Max hole perimeter for hole filling")
+    parser.add_argument("--no_prune_invisible_faces", action="store_true", help="Disable pruning of invisible faces")
+    parser.add_argument("--single_sided", action="store_true", help="Disable double-sided rendering")
+
+    return parser.parse_args()
 
     return parser.parse_args()
 
@@ -109,7 +114,8 @@ def main():
         },
         pipeline_type={
             "512": "512",
-            "1024": "1024_cascade",
+            "1024": "1024",
+            "1024_cascade": "1024_cascade",
             "1536": "1536_cascade",
             "2048": "2048_cascade",
         }[args.resolution],
@@ -140,6 +146,8 @@ def main():
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=args.decimation_target,
+        fill_holes_max_perimeter=args.fill_holes_max_perimeter,
+        repair_method=args.repair_method,
         simplify_method=args.simplify_method,
         texture_extraction=not args.no_texture_gen,
         texture_size=args.texture_size,
@@ -147,7 +155,8 @@ def main():
         remesh_band=1,
         remesh_project=0,
         remesh_method=args.remesh_method,
-        prune_invisible=args.prune_invisible_faces,
+        prune_invisible=not args.no_prune_invisible_faces,
+        force_double_sided=not args.single_sided,
         use_tqdm=True,
         no_pbr=args.no_pbr,
     )

@@ -47,6 +47,41 @@ def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
     return trimesh.Trimesh(out_verts, out_faces)
 
 
+def repair_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor, max_hole_size: float = 0.03):
+    """
+    Repair mesh using MeshLib (fill holes).
+    """
+    import meshlib.mrmeshpy as mrmeshpy
+    import meshlib.mrmeshnumpy as mrmeshnumpy
+
+    # Convert to meshlib
+    v = vertices.cpu().numpy()
+    f = faces.cpu().numpy()
+    mesh_mr = mrmeshnumpy.meshFromFacesVerts(f, v)
+
+    # Multi-pass hole filling
+    for i in range(3):
+        # Identify holes
+        hole_edges = mesh_mr.topology.findHoleRepresentiveEdges()
+        print(f"MeshLib repair pass {i+1}: found {len(hole_edges)} holes.")
+        
+        if len(hole_edges) == 0:
+            break
+        
+        # Fill holes
+        params = mrmeshpy.FillHoleParams()
+        params.metric = mrmeshpy.getUniversalMetric(mesh_mr)
+        
+        for edge in hole_edges:
+            mrmeshpy.fillHole(mesh_mr, edge, params)
+    
+    # Read back
+    out_verts = mrmeshnumpy.getNumpyVerts(mesh_mr)
+    out_faces = mrmeshnumpy.getNumpyFaces(mesh_mr.topology)
+    
+    return torch.from_numpy(out_verts).to(vertices.device).float(), torch.from_numpy(out_faces).to(faces.device).int()
+
+
 
 def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 2048, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
     """
@@ -221,6 +256,8 @@ def to_glb(
     voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
     grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
     decimation_target: int = 1000000,
+    fill_holes_max_perimeter: float = 0.1, # Default maintained but logic handles it
+    repair_method: str = 'cumesh',
     simplify_method: str = 'cumesh',
     texture_extraction: bool = True,
     texture_size: int = 2048,
@@ -233,6 +270,7 @@ def to_glb(
     mesh_cluster_global_iterations=1,
     mesh_cluster_smooth_strength=1,
     prune_invisible: bool = False,
+    force_double_sided: bool = True,
     verbose: bool = False,
     use_tqdm: bool = False,
     no_pbr: bool = False,
@@ -251,6 +289,7 @@ def to_glb(
         voxel_size: (3,) tensor of size of each voxel
         grid_size: (3,) tensor of number of voxels in each dimension
         decimation_target: target number of vertices for mesh simplification
+        fill_holes_max_perimeter: maximum perimeter of holes to fill
         texture_size: size of the texture for baking
         remesh: whether to perform remeshing
         remesh_band: size of the remeshing band
@@ -269,8 +308,7 @@ def to_glb(
     if isinstance(aabb, np.ndarray):
         aabb = torch.tensor(aabb, dtype=torch.float32, device=coords.device)
     assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
-    assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
-    assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
+    assert aabb.dim() == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
     assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
 
     # Calculate grid dimensions based on AABB and voxel size
@@ -313,7 +351,8 @@ def to_glb(
     
     # --- Initial Mesh Cleaning ---
     # Fills holes as much as we can before processing
-    mesh.fill_holes(max_hole_perimeter=3e-2)
+    if fill_holes_max_perimeter > 0:
+        mesh.fill_holes(max_hole_perimeter=fill_holes_max_perimeter)
     if verbose:
         print(f"After filling holes: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     vertices, faces = mesh.read()
@@ -355,7 +394,8 @@ def to_glb(
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
         mesh.remove_small_connected_components(1e-5)
-        mesh.fill_holes(max_hole_perimeter=3e-2)
+        if fill_holes_max_perimeter > 0:
+            mesh.fill_holes(max_hole_perimeter=fill_holes_max_perimeter)
         if verbose:
             print(f"After initial cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
             
@@ -437,6 +477,8 @@ def to_glb(
             t_mesh = reduce_face_with_meshlib(t_mesh, decimation_target)
             mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
 
+
+
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     
@@ -468,8 +510,25 @@ def to_glb(
 
             # Restore to required face count
             mesh.simplify(decimation_target, verbose=verbose)
+
         else:
             print("Warning: Visibility pruning removed all faces! Skipping pruning to be safe.")
+
+    # --- Final Hole Filling (Safety, ensuring watertightness) ---
+    if fill_holes_max_perimeter > 0:
+        if verbose:
+            print(f"Final hole filling with max perimeter {fill_holes_max_perimeter} using {repair_method}...")
+        
+        if repair_method == 'cumesh':
+            mesh.fill_holes(max_hole_perimeter=fill_holes_max_perimeter)
+        elif repair_method == 'meshlib':
+            # GPU -> CPU -> MeshLib -> CPU -> GPU
+            v, f = mesh.read()
+            v, f = repair_with_meshlib(v, f, max_hole_size=fill_holes_max_perimeter)
+            mesh.init(v, f)
+            
+        if verbose:
+             print(f" -> {mesh.num_faces} faces remaining")
 
     
     # --- UV Parameterization ---
@@ -601,7 +660,7 @@ def to_glb(
             baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
             baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
             alphaMode=alpha_mode,
-            doubleSided=True if not remesh else False,
+            doubleSided=True if (not remesh or force_double_sided) else False,
         )
     else:
         material = trimesh.visual.material.PBRMaterial(
@@ -611,7 +670,7 @@ def to_glb(
             metallicFactor=1.0,
             roughnessFactor=1.0,
             alphaMode=alpha_mode,
-            doubleSided=True if not remesh else False,
+            doubleSided=True if (not remesh or force_double_sided) else False,
         )
     
     # --- Coordinate System Conversion & Final Object ---
