@@ -21,7 +21,7 @@ def parse_args():
     # Model and Generation Settings
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--randomize_seed", action="store_true", help="Randomize seed")
-    parser.add_argument("--resolution", type=str, default="1024", choices=["512", "1024", "1024_cascade", "1536", "2048"], help="Generation resolution")
+    parser.add_argument("--resolution", type=str, default="1024", choices=["512", "512g_1024t", "1024", "1024_cascade", "1536", "2048"], help="Generation resolution")
     parser.add_argument("--no_texture_gen", action="store_true", help="Skip texture generation")
     parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
     parser.add_argument("--webp", action="store_true", help="Use WEBP for texture compression in GLB")
@@ -114,6 +114,7 @@ def main():
         },
         pipeline_type={
             "512": "512",
+            "512g_1024t": "512g_1024t",
             "1024": "1024",
             "1024_cascade": "1024_cascade",
             "1536": "1536_cascade",
