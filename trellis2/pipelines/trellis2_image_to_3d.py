@@ -557,7 +557,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             if not no_texture_gen:
                 assert 'tex_slat_flow_model_512' in self.models, "No 512 resolution texture SLat flow model found."
-        elif pipeline_type == '512_tex_upscale':
+        elif pipeline_type == '512g_1024t':
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
             if not no_texture_gen:
                 assert 'tex_slat_flow_model_1024' in self.models, "No 1024 resolution texture SLat flow model found."
@@ -587,18 +587,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         torch.manual_seed(seed)
         cond_512 = self.get_cond(images, 512)
         cond_1024 = self.get_cond(images, 1024) if pipeline_type != '512' else None
-        ss_res = {'512': 32, '512_tex_upscale': 32, '1024': 64, '1024_cascade': 64, '1536_cascade': 32, '2048_cascade': 32}[pipeline_type]
+        ss_res = {'512': 32, '512g_1024t': 32, '1024': 64, '1024_cascade': 64, '1536_cascade': 32, '2048_cascade': 32}[pipeline_type]
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
             num_samples, sparse_structure_sampler_params
         )
-        
+
         # Dynamic switching for complex shapes to prevent OOM
-        if coords.shape[0] > 24000 and pipeline_type == '1024':
+        if self.low_vram and coords.shape[0] > 24000 and pipeline_type in ['1024', '1024_cascade', '1536_cascade', '2048_cascade']:
             if 'shape_slat_flow_model_512' in self.models:
-                print(f"Token count {coords.shape[0]} > 24000. Switching to 512_tex_upscale pipeline to save memory.")
-                pipeline_type = '512_tex_upscale'
-                
+                print(f"Token count {coords.shape[0]} > 24000. Switching to 512g_1024t pipeline to save memory.")
+                pipeline_type = '512g_1024t'
+
                 # Downsample coords from 64 (1024 pipeline) to 32 (512 pipeline)
                 # ss_res was 64, target expects 32
                 coords = (coords // 2).unique(dim=0)
@@ -618,14 +618,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             else:
                 tex_slat = None
             res = 512
-        elif pipeline_type == '512_tex_upscale':
+        elif pipeline_type == '512g_1024t':
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params
             )
             if not no_texture_gen:
                 tex_slat = self.sample_tex_slat(
-                    cond_512, self.models['tex_slat_flow_model_1024'],
+                    cond_1024, self.models['tex_slat_flow_model_1024'],
                     shape_slat, tex_slat_sampler_params
                 )
             else:
