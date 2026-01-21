@@ -315,20 +315,28 @@ class PbrMeshRenderer:
                     if 'grid_sample_3d' not in globals():
                         from flex_gemm.ops.grid_sample import grid_sample_3d
                     mask = rast[..., -1:] > 0
-                    xyz = dr.interpolate(vertices_orig, rast, faces)[0]
-                    xyz = ((xyz - mesh.origin) / mesh.voxel_size).reshape(1, -1, 3)
-                    img = grid_sample_3d(
-                        mesh.attrs,
-                        torch.cat([torch.zeros_like(mesh.coords[..., :1]), mesh.coords], dim=-1),
-                        mesh.voxel_shape,
-                        xyz,
-                        mode='trilinear'
-                    )
-                    img = img.reshape(1, resolution * ssaa, resolution * ssaa, mesh.attrs.shape[-1]) * mask
-                    gb_basecolor = img[0, ..., mesh.layout['base_color']]
-                    gb_metallic = img[0, ..., mesh.layout['metallic']]
-                    gb_roughness = img[0, ..., mesh.layout['roughness']]
-                    gb_alpha = img[0, ..., mesh.layout['alpha']]
+                    if mesh.coords is None:
+                        # Default material for geometry-only meshes
+                        mask_sq = mask[0].float()
+                        gb_basecolor = torch.ones((resolution * ssaa, resolution * ssaa, 3), dtype=torch.float32, device=self.device) * mask_sq
+                        gb_metallic = torch.zeros((resolution * ssaa, resolution * ssaa, 1), dtype=torch.float32, device=self.device)
+                        gb_roughness = torch.full((resolution * ssaa, resolution * ssaa, 1), 0.5, dtype=torch.float32, device=self.device) * mask_sq
+                        gb_alpha = torch.ones((resolution * ssaa, resolution * ssaa, 1), dtype=torch.float32, device=self.device) * mask_sq
+                    else:
+                        xyz = dr.interpolate(vertices_orig, rast, faces)[0]
+                        xyz = ((xyz - mesh.origin) / mesh.voxel_size).reshape(1, -1, 3)
+                        img = grid_sample_3d(
+                            mesh.attrs,
+                            torch.cat([torch.zeros_like(mesh.coords[..., :1]), mesh.coords], dim=-1),
+                            mesh.voxel_shape,
+                            xyz,
+                            mode='trilinear'
+                        )
+                        img = img.reshape(1, resolution * ssaa, resolution * ssaa, mesh.attrs.shape[-1]) * mask
+                        gb_basecolor = img[0, ..., mesh.layout['base_color']]
+                        gb_metallic = img[0, ..., mesh.layout['metallic']]
+                        gb_roughness = img[0, ..., mesh.layout['roughness']]
+                        gb_alpha = img[0, ..., mesh.layout['alpha']]
                 elif isinstance(mesh, MeshWithPbrMaterial):
                     tri_id = rast[0, :, :, -1:]
                     mask = tri_id > 0

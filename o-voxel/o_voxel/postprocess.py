@@ -33,8 +33,11 @@ def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
     settings = mrmeshpy.DecimateSettings()
     settings.maxDeletedFaces = faces_to_delete
     settings.subdivideParts = multiprocessing.cpu_count()
-    # settings.maxError = 0.001
     settings.packMesh = True
+    # Ensure we don't create holes/flips
+    settings.collapseNearNotFlippable = True
+    # Protect existing boundaries if any
+    settings.touchBdVerts = False
 
     print(f'Decimating mesh... targeting {max_facenum} faces from {current_face_count} faces')
     print(f'Decimating mesh... Deleting {faces_to_delete} faces')
@@ -303,10 +306,11 @@ def to_glb(
         use_tqdm: whether to use tqdm to display progress bar
     """
     # --- Input Normalization (AABB, Voxel Size, Grid Size) ---
+    device = coords.device if coords is not None else 'cuda'
     if isinstance(aabb, (list, tuple)):
         aabb = np.array(aabb)
     if isinstance(aabb, np.ndarray):
-        aabb = torch.tensor(aabb, dtype=torch.float32, device=coords.device)
+        aabb = torch.tensor(aabb, dtype=torch.float32, device=device)
     assert isinstance(aabb, torch.Tensor), f"aabb must be a list, tuple, np.ndarray, or torch.Tensor, but got {type(aabb)}"
     assert aabb.dim() == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
     assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
@@ -318,7 +322,7 @@ def to_glb(
         if isinstance(voxel_size, (list, tuple)):
             voxel_size = np.array(voxel_size)
         if isinstance(voxel_size, np.ndarray):
-            voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=coords.device)
+            voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=device)
         grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
     else:
         assert grid_size is not None, "Either voxel_size or grid_size must be provided"
@@ -327,7 +331,7 @@ def to_glb(
         if isinstance(grid_size, (list, tuple)):
             grid_size = np.array(grid_size)
         if isinstance(grid_size, np.ndarray):
-            grid_size = torch.tensor(grid_size, dtype=torch.int32, device=coords.device)
+            grid_size = torch.tensor(grid_size, dtype=torch.int32, device=device)
         voxel_size = (aabb[1] - aabb[0]) / grid_size
     
     # Assertions for dimensions
@@ -445,29 +449,71 @@ def to_glb(
                 print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         elif remesh_method == 'faithful_contouring':
             try:
-                # from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
+                from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
                 from atom3d import MeshBVH
                 from atom3d.grid import OctreeIndexer
             except ImportError:
                 raise ImportError("Faithful Contouring is not installed. Please install it to use faithful_contouring remeshing. See https://github.com/Luo-Yihao/FaithC")
 
+            # Use GPU but with reduced chunk size to avoid OOM
             V = vertices.detach().contiguous().to(device="cuda", dtype=torch.float32)
             F = faces.detach().contiguous().to(device="cuda", dtype=torch.long)
 
-            max_level = int(math.log2(grid_size.max().item()))
+            resolution = grid_size.max().item()
+
+            max_level = int(math.log2(resolution))
             min_level = min(4, max(1, max_level - 1))
 
-            bvh = MeshBVH(V, F, device='cuda')
-            octree = OctreeIndexer(max_level=max_level, bounds=bvh.get_bounds(), device='cuda')
+            grid_bounds = torch.tensor([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]], device="cuda")
 
-            mesh_result = decoder.decode_from_result(fct_result)
+            mesh_bvh = MeshBVH(V, F, device='cuda')
+            octree = OctreeIndexer(max_level=max_level, bounds=mesh_bvh.get_bounds(), device='cuda')
 
-            mesh.init(
-                mesh_result.vertices.contiguous(),
-                mesh_result.faces.contiguous().to(torch.int32),
+            # Define Safe Encoder wrapper to reduce memory usage
+            class SafeFCTEncoder(FCTEncoder):
+                def encode(self, **kwargs):
+                    return super().encode(**kwargs)
+                
+                def _octree_traverse_with_clip(self, min_level: int):
+                    # Reduce chunk size from 16384 -> 8192 (To fit in ~40GB VRAM, avoid OOM but minimize artifacts)
+                    return super()._octree_traverse_with_clip(
+                        min_level, 
+                        broadphase_chunk_size=65536, 
+                        clip_chunk_size=8192
+                    )
+
+            encoder = SafeFCTEncoder(mesh_bvh, octree, device="cuda")
+            solver_weights = {
+                'lambda_n': 1.0,
+                'lambda_d': 1e-3,
+                'weight_power': 1
+            }
+            fct_result = encoder.encode(
+                min_level=min_level,
+                solver_weights=solver_weights,
+                compute_flux=True,
+                clamp_anchors=True
             )
 
-        # Simplify and clean the remeshed result (similar logic to above)
+            decoder = FCTDecoder(resolution=resolution, bounds=grid_bounds, device="cuda")
+            mesh_result = decoder.decode_from_result(fct_result)
+
+            verts = mesh_result.vertices.contiguous()
+            faces = mesh_result.faces.contiguous().to(torch.int32)
+
+            # Cleanup
+            del encoder
+            del decoder
+            del mesh_result
+            del mesh_bvh
+            del fct_result
+            torch.cuda.empty_cache()
+            
+            mesh.init(
+                verts,
+                faces,
+            )
+
         if simplify_method == 'cumesh':
             mesh.simplify(decimation_target, verbose=verbose)
         elif simplify_method == 'meshlib':
