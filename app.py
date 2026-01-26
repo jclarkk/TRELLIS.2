@@ -398,9 +398,10 @@ def image_to_3d(
         },
         pipeline_type={
             "512": "512",
-            "1024": "1024_cascade",
-            "1536": "1536_cascade",
-            "2048": "2048_cascade",
+            "1024": "1024",
+            "1024_cascade": "1024_cascade",
+            "1536_cascade": "1536_cascade",
+            "2048_cascade": "2048_cascade",
         }[resolution],
         return_latent=True,
         max_num_tokens=max_num_tokens,
@@ -486,6 +487,9 @@ def extract_glb(
     simplify_method: str,
     no_texture_gen: bool,
     prune_invisible_faces: bool,
+    merge_vertices_dist: float,
+    shade_smooth: bool,
+    shade_smooth_angle: float,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[str, str]:
@@ -522,6 +526,9 @@ def extract_glb(
         remesh_project=0,
         remesh_method=remesh_method,
         prune_invisible=prune_invisible_faces,
+        merge_vertices_dist=merge_vertices_dist,
+        shade_smooth=shade_smooth,
+        shade_smooth_angle=shade_smooth_angle,
         use_tqdm=True,
     )
     now = datetime.now()
@@ -544,13 +551,16 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
 
-            resolution = gr.Radio(["512", "1024", "1536", "2048"], label="Resolution", value="1024")
+            resolution = gr.Radio(["512", "1024", "1024_cascade", "1536_cascade", "2048_cascade"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
             remesh_method = gr.Dropdown(["dual_contouring", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
             simplify_method = gr.Dropdown(["cumesh", "meshlib", "None"], label="Simplify Method", value="cumesh")
             prune_invisible_faces = gr.Checkbox(label="Prune Invisible Faces", value=True)
+            merge_vertices_dist = gr.Slider(0.0, 1.0, label="Merge Vertices Dist", value=0.1, step=0.01)
+            shade_smooth = gr.Checkbox(label="Shade Smooth", value=True)
+            shade_smooth_angle = gr.Slider(0, 90, label="Shade Smooth Angle", value=0, step=1)
             no_texture_gen = gr.Checkbox(label="Skip Texture Generation", value=False)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
@@ -563,6 +573,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     ss_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.7, step=0.01)
                     ss_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     ss_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=5.0, step=0.1)
+                    ss_sampling_threshold = gr.Slider(-10.0, 10.0, label="Sampling Threshold", value=0.0, step=0.1)
 
                 gr.Markdown("Stage 2: Shape Generation")
                 with gr.Row():
@@ -635,7 +646,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen, prune_invisible_faces],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle],
         outputs=[glb_output, download_btn],
     )
 

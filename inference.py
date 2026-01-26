@@ -56,6 +56,10 @@ def parse_args():
     parser.add_argument("--fill_holes_max_perimeter", type=float, default=0.03, help="Max hole perimeter for hole filling")
     parser.add_argument("--no_prune_invisible_faces", action="store_true", help="Disable pruning of invisible faces")
     parser.add_argument("--single_sided", action="store_true", help="Disable double-sided rendering")
+    parser.add_argument("--merge_vertices_dist", type=float, default=0.1, help="Distance threshold for vertex merging")
+    parser.add_argument("--shade_smooth", action="store_true", default=True, help="Enable smooth shading")
+    parser.add_argument("--no_shade_smooth", action="store_false", dest="shade_smooth", help="Disable smooth shading")
+    parser.add_argument("--shade_smooth_angle", type=float, default=0.0, help="Angle threshold for smooth shading (degrees)")
 
     return parser.parse_args()
 
@@ -158,6 +162,9 @@ def main():
         remesh_method=args.remesh_method,
         prune_invisible=not args.no_prune_invisible_faces,
         force_double_sided=not args.single_sided,
+        merge_vertices_dist=args.merge_vertices_dist,
+        shade_smooth=args.shade_smooth,
+        shade_smooth_angle=args.shade_smooth_angle,
         use_tqdm=True,
         no_pbr=args.no_pbr,
     )

@@ -85,6 +85,31 @@ def repair_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor, max_hole_si
     return torch.from_numpy(out_verts).to(vertices.device).float(), torch.from_numpy(out_faces).to(faces.device).int()
 
 
+def merge_vertices_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor, dist: float = 0.001):
+    """
+    Merge vertices by distance using MeshLib.
+    """
+    import meshlib.mrmeshpy as mrmeshpy
+    import meshlib.mrmeshnumpy as mrmeshnumpy
+
+    # Convert to meshlib
+    v = vertices.cpu().numpy()
+    f = faces.cpu().numpy()
+    mesh_mr = mrmeshnumpy.meshFromFacesVerts(f, v)
+
+    # Unite close vertices
+    mrmeshpy.uniteCloseVertices(mesh_mr, dist)
+
+    # Pack to remove unused vertices and degenerate faces
+    mesh_mr.packOptimally()
+
+    # Read back
+    out_verts = mrmeshnumpy.getNumpyVerts(mesh_mr)
+    out_faces = mrmeshnumpy.getNumpyFaces(mesh_mr.topology)
+
+    return torch.from_numpy(out_verts).to(vertices.device).float(), torch.from_numpy(out_faces).to(faces.device).int()
+
+
 
 def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 2048, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
     """
@@ -259,7 +284,10 @@ def to_glb(
     voxel_size: Union[float, list, tuple, np.ndarray, torch.Tensor] = None,
     grid_size: Union[int, list, tuple, np.ndarray, torch.Tensor] = None,
     decimation_target: int = 1000000,
-    fill_holes_max_perimeter: float = 0.1, # Default maintained but logic handles it
+    merge_vertices_dist: float = 0.1,
+    fill_holes_max_perimeter: float = 0.0,
+    shade_smooth: bool = True,
+    shade_smooth_angle: float = 0.0,
     repair_method: str = 'cumesh',
     simplify_method: str = 'cumesh',
     texture_extraction: bool = True,
@@ -292,7 +320,10 @@ def to_glb(
         voxel_size: (3,) tensor of size of each voxel
         grid_size: (3,) tensor of number of voxels in each dimension
         decimation_target: target number of vertices for mesh simplification
+        merge_vertices_dist: distance threshold for merging vertices
         fill_holes_max_perimeter: maximum perimeter of holes to fill
+        shade_smooth: whether to use smooth shading (interpolated normals)
+        shade_smooth_angle: angle threshold for smoothing (in degrees, 0 means smooth all)
         texture_size: size of the texture for baking
         remesh: whether to perform remeshing
         remesh_band: size of the remeshing band
@@ -514,6 +545,18 @@ def to_glb(
                 faces,
             )
 
+        # Step 1.5: Merge vertices if requested
+        if merge_vertices_dist > 0:
+            if verbose:
+                print(f"Merging vertices with distance {merge_vertices_dist}...")
+            v, f = mesh.read()
+            v, f = merge_vertices_with_meshlib(v, f, dist=merge_vertices_dist)
+            mesh.init(v, f)
+            mesh.remove_duplicate_faces()
+            mesh.repair_non_manifold_edges()
+            if verbose:
+                print(f"After merging and cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+
         if simplify_method == 'cumesh':
             mesh.simplify(decimation_target, verbose=verbose)
         elif simplify_method == 'meshlib':
@@ -522,8 +565,6 @@ def to_glb(
             t_mesh = trimesh.Trimesh(v.cpu().numpy(), f.cpu().numpy())
             t_mesh = reduce_face_with_meshlib(t_mesh, decimation_target)
             mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
-
-
 
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
@@ -594,12 +635,23 @@ def to_glb(
         vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2], -vertices_np[:, 1]
         normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2], -normals_np[:, 1]
         
-        return trimesh.Trimesh(
+        mesh_out = trimesh.Trimesh(
             vertices=vertices_np,
             faces=faces_np,
             vertex_normals=normals_np,
             process=False,
         )
+
+        # Apply Shade Smoothing
+        if not shade_smooth:
+            # Flat shading: unmerge vertices to have one normal per face corner
+            mesh_out.unmerge_vertices()
+        elif shade_smooth_angle > 0:
+            # Auto smooth: split at angles sharper than threshold
+            import trimesh.graph as tg
+            mesh_out = tg.smooth_shade(mesh_out, np.radians(shade_smooth_angle))
+
+        return mesh_out
 
     if use_tqdm:
         pbar.set_description("Parameterizing new mesh")
@@ -737,6 +789,13 @@ def to_glb(
         process=False,
         visual=trimesh.visual.TextureVisuals(uv=uvs_np, material=material)
     )
+
+    # Apply Shade Smoothing
+    if not shade_smooth:
+        textured_mesh.unmerge_vertices()
+    elif shade_smooth_angle > 0:
+        import trimesh.graph as tg
+        textured_mesh = tg.smooth_shade(textured_mesh, np.radians(shade_smooth_angle))
     
     if use_tqdm:
         pbar.update(1)
