@@ -643,10 +643,7 @@ def to_glb(
         )
 
         # Apply Shade Smoothing
-        if not shade_smooth:
-            # Flat shading: unmerge vertices to have one normal per face corner
-            mesh_out.unmerge_vertices()
-        elif shade_smooth_angle > 0:
+        if shade_smooth_angle > 0:
             # Auto smooth: split at angles sharper than threshold
             import trimesh.graph as tg
             mesh_out = tg.smooth_shade(mesh_out, np.radians(shade_smooth_angle))
@@ -791,9 +788,7 @@ def to_glb(
     )
 
     # Apply Shade Smoothing
-    if not shade_smooth:
-        textured_mesh.unmerge_vertices()
-    elif shade_smooth_angle > 0:
+    if shade_smooth_angle > 0:
         import trimesh.graph as tg
         textured_mesh = tg.smooth_shade(textured_mesh, np.radians(shade_smooth_angle))
     
