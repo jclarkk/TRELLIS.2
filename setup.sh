@@ -122,7 +122,7 @@ fi
 
 if [ "$CUMESH" = true ] ; then
     mkdir -p /tmp/extensions
-    git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive
+    git clone https://github.com/jclarkk/CuMesh.git /tmp/extensions/CuMesh --recursive
     pip install /tmp/extensions/CuMesh --no-build-isolation
 fi
 

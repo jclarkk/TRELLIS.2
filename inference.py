@@ -50,7 +50,7 @@ def parse_args():
     # Export Settings
     parser.add_argument("--decimation_target", type=int, default=500000, help="Target face count for decimation")
     parser.add_argument("--texture_size", type=int, default=2048, choices=[1024, 2048, 4096], help="Texture size")
-    parser.add_argument("--remesh_method", type=str, default="dual_contouring", choices=["dual_contouring", "faithful_contouring", "none"], help="Remesh method")
+    parser.add_argument("--remesh_method", type=str, default="dual_contouring", choices=["dual_contouring", "dual_contouring_vb", "faithful_contouring", "none"], help="Remesh method")
     parser.add_argument("--simplify_method", type=str, default="cumesh", choices=["cumesh", "meshlib"], help="Simplify method")
     parser.add_argument("--repair_method", type=str, default="cumesh", choices=["cumesh", "meshlib"], help="Repair method (hole filling)")
     parser.add_argument("--fill_holes_max_perimeter", type=float, default=0.03, help="Max hole perimeter for hole filling")

@@ -50,7 +50,7 @@ def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
     return trimesh.Trimesh(out_verts, out_faces)
 
 
-def repair_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor, max_hole_size: float = 0.03):
+def repair_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor):
     """
     Repair mesh using MeshLib (fill holes).
     """
@@ -109,7 +109,56 @@ def merge_vertices_with_meshlib(vertices: torch.Tensor, faces: torch.Tensor, dis
 
     return torch.from_numpy(out_verts).to(vertices.device).float(), torch.from_numpy(out_faces).to(faces.device).int()
 
+def pymeshfix_repair(vertices: torch.Tensor, faces: torch.Tensor, device=None):
+    """
+    vertices: (N,3) torch tensor (cpu or cuda)
+    faces:    (M,3|4|k) torch tensor (cpu or cuda)
+    returns:  (v_torch, f_torch) as contiguous torch tensors on `device`
+    """
+    import pymeshfix
 
+    def _torch_to_numpy_cpu(x, dtype=None):
+        if isinstance(x, torch.Tensor):
+            x = x.detach()
+            if x.is_cuda:
+                x = x.cpu()
+            x = x.numpy()
+        arr = np.asarray(x)
+        if dtype is not None:
+            arr = arr.astype(dtype, copy=False)
+        return arr
+
+    if device is None:
+        device = vertices.device
+
+    # --- CPU numpy for pymeshfix ---
+    v = _torch_to_numpy_cpu(vertices, dtype=np.float64)
+    f = _torch_to_numpy_cpu(faces)
+
+    if f.size == 0:
+        raise ValueError("faces is empty")
+    if f.ndim != 2:
+        raise ValueError(f"faces has wrong ndim: {f.ndim}, shape={f.shape}")
+
+    # triangulate if needed
+    if f.shape[1] != 3:
+        tm = trimesh.Trimesh(vertices=v, faces=f, process=False).triangulate()
+        v = np.asarray(tm.vertices, dtype=np.float64)
+        f = np.asarray(tm.faces, dtype=np.int64)
+    else:
+        f = f.astype(np.int64, copy=False)
+
+    # repair
+    mf = pymeshfix.MeshFix(v, f)
+    mf.repair(verbose=True, joincomp=True, remove_smallest_components=False)
+    v2 = mf.v
+    f2 = mf.f
+
+    # --- back to torch for cumesh ---
+    v_t = torch.from_numpy(np.asarray(v2)).to(device=device, dtype=torch.float32).contiguous()
+    f_t = torch.from_numpy(np.asarray(f2)).to(device=device, dtype=torch.int64).contiguous()
+
+    return v_t, f_t
 
 def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 2048, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
     """
@@ -423,7 +472,7 @@ def to_glb(
             mesh.init(torch.from_numpy(t_mesh.vertices).float().cuda(), torch.from_numpy(t_mesh.faces).int().cuda())
 
         if verbose:
-            print(f"After inital simplification: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+            print(f"After initial simplification: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
         
         # Step 2: Clean up topology (duplicates, non-manifolds, isolated parts)
         mesh.remove_duplicate_faces()
@@ -478,6 +527,17 @@ def to_glb(
             ))
             if verbose:
                 print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+        elif remesh_method == 'dual_contouring_vb':
+            resolution = grid_size.max().item()
+
+            # Perform Dual Contouring remeshing (rebuilds topology)
+            mesh.init(*cumesh.remeshing.reconstruct_mesh_dc(
+                vertices, faces,
+                resolution = resolution,
+                band = remesh_band,
+                verbose = verbose,
+                bvh = bvh,
+            ))
         elif remesh_method == 'faithful_contouring':
             try:
                 from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
@@ -545,6 +605,9 @@ def to_glb(
                 faces,
             )
 
+        # Unify face orientations
+        mesh.unify_face_orientations()
+
         # Step 1.5: Merge vertices if requested
         if merge_vertices_dist > 0:
             if verbose:
@@ -602,7 +665,7 @@ def to_glb(
             print("Warning: Visibility pruning removed all faces! Skipping pruning to be safe.")
 
     # --- Final Hole Filling (Safety, ensuring watertightness) ---
-    if fill_holes_max_perimeter > 0:
+    if repair_method:
         if verbose:
             print(f"Final hole filling with max perimeter {fill_holes_max_perimeter} using {repair_method}...")
         
@@ -611,12 +674,17 @@ def to_glb(
         elif repair_method == 'meshlib':
             # GPU -> CPU -> MeshLib -> CPU -> GPU
             v, f = mesh.read()
-            v, f = repair_with_meshlib(v, f, max_hole_size=fill_holes_max_perimeter)
+            v, f = repair_with_meshlib(v, f)
             mesh.init(v, f)
-            
+        elif repair_method == 'pymeshfix':
+            v, f = mesh.read()
+
+            mv, mf = pymeshfix_repair(v, f)
+
+            mf = mf.to(torch.int32)
+            mesh.init(mv, mf)
         if verbose:
              print(f" -> {mesh.num_faces} faces remaining")
-
     
     # --- UV Parameterization ---
     if not texture_extraction:
@@ -643,7 +711,7 @@ def to_glb(
         )
 
         # Apply Shade Smoothing
-        if shade_smooth_angle > 0:
+        if shade_smooth and shade_smooth_angle > 0:
             # Auto smooth: split at angles sharper than threshold
             import trimesh.graph as tg
             mesh_out = tg.smooth_shade(mesh_out, np.radians(shade_smooth_angle))
@@ -788,7 +856,7 @@ def to_glb(
     )
 
     # Apply Shade Smoothing
-    if shade_smooth_angle > 0:
+    if shade_smooth and shade_smooth_angle > 0:
         import trimesh.graph as tg
         textured_mesh = tg.smooth_shade(textured_mesh, np.radians(shade_smooth_angle))
     

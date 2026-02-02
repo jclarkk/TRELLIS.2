@@ -484,6 +484,8 @@ def extract_glb(
     decimation_target: int,
     texture_size: int,
     remesh_method: str,
+    fill_holes_max_perimeter: int,
+    repair_method: str,
     simplify_method: str,
     no_texture_gen: bool,
     prune_invisible_faces: bool,
@@ -518,6 +520,8 @@ def extract_glb(
         grid_size=res,
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=decimation_target,
+        fill_holes_max_perimeter=fill_holes_max_perimeter,
+        repair_method=repair_method,
         simplify_method=simplify_method,
         texture_extraction=texture_extraction,
         texture_size=texture_size,
@@ -527,7 +531,6 @@ def extract_glb(
         remesh_method=remesh_method,
         prune_invisible=prune_invisible_faces,
         merge_vertices_dist=merge_vertices_dist,
-        shade_smooth=shade_smooth,
         shade_smooth_angle=shade_smooth_angle,
         use_tqdm=True,
     )
@@ -555,7 +558,9 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
-            remesh_method = gr.Dropdown(["dual_contouring", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
+            fill_holes_max_perimeter = gr.Slider(0.0, 1.0, label="Fill holes max perimeter", value=0.0, step=0.05)
+            remesh_method = gr.Dropdown(["dual_contouring", "dual_contouring_vb", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
+            repair_method = gr.Dropdown(["cumesh", "meshlib", "pymeshfix"], label="Repair (Fill Holes) Method", value="")
             simplify_method = gr.Dropdown(["cumesh", "meshlib", "None"], label="Simplify Method", value="cumesh")
             prune_invisible_faces = gr.Checkbox(label="Prune Invisible Faces", value=True)
             merge_vertices_dist = gr.Slider(0.0, 1.0, label="Merge Vertices Dist", value=0.1, step=0.01)
@@ -646,7 +651,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, remesh_method, simplify_method, no_texture_gen, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, fill_holes_max_perimeter, repair_method, simplify_method, no_texture_gen, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle],
         outputs=[glb_output, download_btn],
     )
 
