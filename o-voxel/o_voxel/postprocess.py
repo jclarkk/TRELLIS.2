@@ -1,5 +1,6 @@
 from typing import *
 from tqdm import tqdm
+import gc
 import math
 import numpy as np
 import torch
@@ -12,7 +13,124 @@ import nvdiffrast.torch as dr
 import cumesh
 
 
+def remove_floaters(vertices: torch.Tensor, faces: torch.Tensor, min_component_ratio: float = 0.001):
+    """
+    Remove small disconnected components (floaters) from a mesh.
+    Uses trimesh's connected components to identify and remove small pieces.
+    
+    Args:
+        vertices: (N, 3) tensor of vertex positions
+        faces: (M, 3) tensor of face indices
+        min_component_ratio: Minimum fraction of total faces to keep a component (default 1%)
+    
+    Returns:
+        (vertices, faces) tensors with floaters removed
+    """
+    v_np = vertices.cpu().numpy()
+    f_np = faces.cpu().numpy()
+    mesh = trimesh.Trimesh(vertices=v_np, faces=f_np, process=False)
+    
+    # Get connected components
+    components = mesh.split(only_watertight=False)
+    if len(components) <= 1:
+        return vertices, faces
+    
+    # Find the largest component
+    largest = max(components, key=lambda c: len(c.faces))
+    total_faces = sum(len(c.faces) for c in components)
+    
+    # Keep components that are at least min_component_ratio of total
+    min_faces = total_faces * min_component_ratio
+    kept = [c for c in components if len(c.faces) >= min_faces]
+    
+    if len(kept) == 0:
+        kept = [largest]
+    
+    if len(kept) == 1:
+        result = kept[0]
+    else:
+        result = trimesh.util.concatenate(kept)
+    
+    removed = total_faces - len(result.faces)
+    if removed > 0:
+        print(f"Removed {removed} floater faces ({len(components) - len(kept)} components)")
+    
+    return (
+        torch.from_numpy(result.vertices).to(vertices.device).float(),
+        torch.from_numpy(result.faces).to(faces.device).int()
+    )
 
+
+def fill_holes_meshlib_unlimited(vertices: torch.Tensor, faces: torch.Tensor, max_passes: int = 3, max_holes: int = 5000):
+    """
+    Fill ALL holes in a mesh using MeshLib with no perimeter limit.
+    Uses getUniversalMetric for optimal triangulation quality.
+    
+    Args:
+        vertices: (N, 3) tensor of vertex positions
+        faces: (M, 3) tensor of face indices
+        max_passes: Maximum number of filling passes (in case new holes appear)
+        max_holes: Maximum number of holes to fill per pass (safety cap to prevent OOM)
+    
+    Returns:
+        (vertices, faces) tensors with all holes filled
+    """
+    import meshlib.mrmeshpy as mrmeshpy
+    import meshlib.mrmeshnumpy as mrmeshnumpy
+
+    v = vertices.cpu().numpy()
+    f = faces.cpu().numpy()
+    mesh_mr = mrmeshnumpy.meshFromFacesVerts(f, v)
+
+    total_filled = 0
+    for i in range(max_passes):
+        hole_edges = mesh_mr.topology.findHoleRepresentiveEdges()
+        n_holes = len(hole_edges)
+        if n_holes == 0:
+            break
+        
+        if n_holes > max_holes:
+            print(f"MeshLib hole fill pass {i+1}: {n_holes} holes found, capping at {max_holes} (sorted by size)")
+            # Only fill up to max_holes to avoid OOM
+            hole_edges = hole_edges[:max_holes]
+            n_holes = max_holes
+        else:
+            print(f"MeshLib hole fill pass {i+1}: filling {n_holes} holes...")
+        
+        params = mrmeshpy.FillHoleParams()
+        params.metric = mrmeshpy.getUniversalMetric(mesh_mr)
+        
+        for edge in hole_edges:
+            mrmeshpy.fillHole(mesh_mr, edge, params)
+        
+        total_filled += n_holes
+    
+    if total_filled > 0:
+        print(f"Total holes filled: {total_filled}")
+    
+    out_verts = mrmeshnumpy.getNumpyVerts(mesh_mr)
+    out_faces = mrmeshnumpy.getNumpyFaces(mesh_mr.topology)
+    
+    return (
+        torch.from_numpy(out_verts).to(vertices.device).float(),
+        torch.from_numpy(out_faces).to(faces.device).int()
+    )
+
+
+def smooth_vertex_normals(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """
+    Compute smooth vertex normals for a mesh.
+    This hides faceting artifacts and makes seam lines less visible.
+    
+    Args:
+        mesh: The trimesh to smooth normals on.
+    
+    Returns:
+        A copy of the mesh with smooth vertex normals.
+    """
+    new_mesh = mesh.copy()
+    new_mesh.vertex_normals = trimesh.smoothing.get_vertices_normals(new_mesh)
+    return new_mesh
 
 
 def reduce_face_with_meshlib(mesh: trimesh.Trimesh, max_facenum: int = 100000):
@@ -160,7 +278,7 @@ def pymeshfix_repair(vertices: torch.Tensor, faces: torch.Tensor, device=None):
 
     return v_t, f_t
 
-def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 2048, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
+def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: int = 256, resolution: int = 1024, face_padding: int = 4, verbose: bool = False) -> torch.Tensor:
     """
     Identifies visible faces by rendering the mesh from multiple viewpoints.
     """
@@ -254,7 +372,7 @@ def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: in
     visible_faces_mask = torch.zeros(faces.shape[0], dtype=torch.bool, device=device)
     
     # Process in batches of views to be safe
-    batch_size = 16
+    batch_size = 4
     for i in range(0, num_views, batch_size):
         end = min(i + batch_size, num_views)
         batch_pos = pos_clip[i:end]
@@ -272,6 +390,10 @@ def get_visible_faces(vertices: torch.Tensor, faces: torch.Tensor, num_views: in
         valid_ids = unique_ids[unique_ids > 0] - 1
         
         visible_faces_mask[valid_ids.long()] = True
+        
+        # Free rasterization memory
+        del rast, tri_ids, unique_ids, valid_ids, batch_pos
+        torch.cuda.empty_cache()
         
     if verbose:
         print(f"  Initial Pass: Found {visible_faces_mask.sum()} visible faces")
@@ -335,6 +457,9 @@ def to_glb(
     decimation_target: int = 1000000,
     merge_vertices_dist: float = 0.1,
     fill_holes_max_perimeter: float = 0.0,
+    fill_holes_unlimited: bool = False,
+    remove_floaters_enabled: bool = False,
+    smooth_normals: bool = False,
     shade_smooth: bool = True,
     shade_smooth_angle: float = 0.0,
     repair_method: str = 'cumesh',
@@ -345,6 +470,7 @@ def to_glb(
     remesh_band: float = 1,
     remesh_project: float = 0.9,
     remesh_method: str = 'dual_contouring',
+    remesh_quad: bool = False,
     mesh_cluster_threshold_cone_half_angle_rad=np.radians(90.0),
     mesh_cluster_refine_iterations=0,
     mesh_cluster_global_iterations=1,
@@ -434,7 +560,10 @@ def to_glb(
     mesh.init(vertices, faces)
     
     # --- Initial Mesh Cleaning ---
-    # Fills holes as much as we can before processing
+    # Only use limited perimeter hole filling on the raw mesh.
+    # Floater removal and unlimited hole filling are deferred to post-remesh,
+    # because the raw extracted mesh has hundreds of thousands of micro-components
+    # and holes that would cause OOM.
     if fill_holes_max_perimeter > 0:
         mesh.fill_holes(max_hole_perimeter=fill_holes_max_perimeter)
     if verbose:
@@ -509,101 +638,127 @@ def to_glb(
     
     # --- Branch 2: Remeshing Pipeline ---
     else:
-        if remesh_method == 'dual_contouring':
-            center = aabb.mean(dim=0)
-            scale = (aabb[1] - aabb[0]).max().item()
-            resolution = grid_size.max().item()
-
-            # Perform Dual Contouring remeshing (rebuilds topology)
-            mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
-                vertices, faces,
-                center = center,
-                scale = (resolution + 3 * remesh_band) / resolution * scale,
-                resolution = resolution,
-                band = remesh_band,
-                project_back = remesh_project,
-                verbose = verbose,
-                bvh = bvh,
-            ))
-            if verbose:
-                print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
-        elif remesh_method == 'dual_contouring_vb':
-            resolution = grid_size.max().item()
-
-            # Perform Dual Contouring remeshing (rebuilds topology)
-            mesh.init(*cumesh.remeshing.reconstruct_mesh_dc(
-                vertices, faces,
-                resolution = resolution,
-                band = remesh_band,
-                verbose = verbose,
-                bvh = bvh,
-            ))
-        elif remesh_method == 'faithful_contouring':
+        if remesh_quad:
+            # Quad-based Dual Contouring (superior topology, used by ComfyUI-Trellis2)
             try:
-                from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
-                from atom3d import MeshBVH
-                from atom3d.grid import OctreeIndexer
-            except ImportError:
-                raise ImportError("Faithful Contouring is not installed. Please install it to use faithful_contouring remeshing. See https://github.com/Luo-Yihao/FaithC")
+                center = aabb.mean(dim=0)
+                scale = (aabb[1] - aabb[0]).max().item()
+                resolution = grid_size.max().item()
 
-            # Use GPU but with reduced chunk size to avoid OOM
-            V = vertices.detach().contiguous().to(device="cuda", dtype=torch.float32)
-            F = faces.detach().contiguous().to(device="cuda", dtype=torch.long)
-
-            resolution = grid_size.max().item()
-
-            max_level = int(math.log2(resolution))
-            min_level = min(4, max(1, max_level - 1))
-
-            grid_bounds = torch.tensor([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]], device="cuda")
-
-            mesh_bvh = MeshBVH(V, F, device='cuda')
-            octree = OctreeIndexer(max_level=max_level, bounds=mesh_bvh.get_bounds(), device='cuda')
-
-            # Define Safe Encoder wrapper to reduce memory usage
-            class SafeFCTEncoder(FCTEncoder):
-                def encode(self, **kwargs):
-                    return super().encode(**kwargs)
+                if verbose:
+                    print(f'Performing Quad Dual Contouring at resolution {resolution}...')
+                vertices_q, faces_q = cumesh.remeshing.reconstruct_mesh_dc_quad(
+                    vertices, faces, resolution, verbose=verbose, remove_inner_faces=True
+                )
                 
-                def _octree_traverse_with_clip(self, min_level: int):
-                    # Reduce chunk size from 16384 -> 8192 (To fit in ~40GB VRAM, avoid OOM but minimize artifacts)
-                    return super()._octree_traverse_with_clip(
-                        min_level, 
-                        broadphase_chunk_size=65536, 
-                        clip_chunk_size=8192
-                    )
+                # Remove floaters from quad remeshing
+                if remove_floaters_enabled:
+                    vertices_q, faces_q = remove_floaters(vertices_q, faces_q)
+                
+                mesh.init(vertices_q, faces_q)
+                if verbose:
+                    print(f"After quad remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+            except AttributeError:
+                print("Warning: reconstruct_mesh_dc_quad not available in cumesh. Falling back to standard DC.")
+                remesh_quad = False
+                # Fall through to standard DC below
+        
+        if not remesh_quad:
+            if remesh_method == 'dual_contouring':
+                center = aabb.mean(dim=0)
+                scale = (aabb[1] - aabb[0]).max().item()
+                resolution = grid_size.max().item()
 
-            encoder = SafeFCTEncoder(mesh_bvh, octree, device="cuda")
-            solver_weights = {
-                'lambda_n': 1.0,
-                'lambda_d': 1e-3,
-                'weight_power': 1
-            }
-            fct_result = encoder.encode(
-                min_level=min_level,
-                solver_weights=solver_weights,
-                compute_flux=True,
-                clamp_anchors=True
-            )
+                # Perform Dual Contouring remeshing (rebuilds topology)
+                mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
+                    vertices, faces,
+                    center = center,
+                    scale = (resolution + 3 * remesh_band) / resolution * scale,
+                    resolution = resolution,
+                    band = remesh_band,
+                    project_back = remesh_project,
+                    verbose = verbose,
+                    bvh = bvh,
+                ))
+                if verbose:
+                    print(f"After remeshing: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+            elif remesh_method == 'dual_contouring_vb':
+                resolution = grid_size.max().item()
 
-            decoder = FCTDecoder(resolution=resolution, bounds=grid_bounds, device="cuda")
-            mesh_result = decoder.decode_from_result(fct_result)
+                # Perform Dual Contouring remeshing (rebuilds topology)
+                mesh.init(*cumesh.remeshing.reconstruct_mesh_dc(
+                    vertices, faces,
+                    resolution = resolution,
+                    band = remesh_band,
+                    verbose = verbose,
+                    bvh = bvh,
+                ))
+            elif remesh_method == 'faithful_contouring':
+                try:
+                    from faithcontour import FCTEncoder, FCTDecoder, normalize_mesh
+                    from atom3d import MeshBVH
+                    from atom3d.grid import OctreeIndexer
+                except ImportError:
+                    raise ImportError("Faithful Contouring is not installed. Please install it to use faithful_contouring remeshing. See https://github.com/Luo-Yihao/FaithC")
 
-            verts = mesh_result.vertices.contiguous()
-            faces = mesh_result.faces.contiguous().to(torch.int32)
+                # Use GPU but with reduced chunk size to avoid OOM
+                V = vertices.detach().contiguous().to(device="cuda", dtype=torch.float32)
+                F = faces.detach().contiguous().to(device="cuda", dtype=torch.long)
 
-            # Cleanup
-            del encoder
-            del decoder
-            del mesh_result
-            del mesh_bvh
-            del fct_result
-            torch.cuda.empty_cache()
-            
-            mesh.init(
-                verts,
-                faces,
-            )
+                resolution = grid_size.max().item()
+
+                max_level = int(math.log2(resolution))
+                min_level = min(4, max(1, max_level - 1))
+
+                grid_bounds = torch.tensor([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]], device="cuda")
+
+                mesh_bvh = MeshBVH(V, F, device='cuda')
+                octree = OctreeIndexer(max_level=max_level, bounds=mesh_bvh.get_bounds(), device='cuda')
+
+                # Define Safe Encoder wrapper to reduce memory usage
+                class SafeFCTEncoder(FCTEncoder):
+                    def encode(self, **kwargs):
+                        return super().encode(**kwargs)
+                    
+                    def _octree_traverse_with_clip(self, min_level: int):
+                        # Reduce chunk size from 16384 -> 8192 (To fit in ~40GB VRAM, avoid OOM but minimize artifacts)
+                        return super()._octree_traverse_with_clip(
+                            min_level, 
+                            broadphase_chunk_size=65536, 
+                            clip_chunk_size=8192
+                        )
+
+                encoder = SafeFCTEncoder(mesh_bvh, octree, device="cuda")
+                solver_weights = {
+                    'lambda_n': 1.0,
+                    'lambda_d': 1e-3,
+                    'weight_power': 1
+                }
+                fct_result = encoder.encode(
+                    min_level=min_level,
+                    solver_weights=solver_weights,
+                    compute_flux=True,
+                    clamp_anchors=True
+                )
+
+                decoder = FCTDecoder(resolution=resolution, bounds=grid_bounds, device="cuda")
+                mesh_result = decoder.decode_from_result(fct_result)
+
+                verts = mesh_result.vertices.contiguous()
+                faces = mesh_result.faces.contiguous().to(torch.int32)
+
+                # Cleanup
+                del encoder
+                del decoder
+                del mesh_result
+                del mesh_bvh
+                del fct_result
+                torch.cuda.empty_cache()
+                
+                mesh.init(
+                    verts,
+                    faces,
+                )
 
         # Unify face orientations
         mesh.unify_face_orientations()
@@ -631,6 +786,27 @@ def to_glb(
 
         if verbose:
             print(f"After simplifying: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+
+        # --- Post-remesh floater removal ---
+        # Safe to run now since remeshing has consolidated the topology
+        if remove_floaters_enabled:
+            if verbose:
+                print("Removing floaters (post-remesh)...")
+            v, f = mesh.read()
+            v, f = remove_floaters(v, f)
+            mesh.init(v, f)
+            if verbose:
+                print(f"After floater removal: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
+
+        # --- Post-remesh unlimited hole filling ---
+        if fill_holes_unlimited:
+            if verbose:
+                print("Filling ALL holes with meshlib (unlimited, post-remesh)...")
+            v, f = mesh.read()
+            v, f = fill_holes_meshlib_unlimited(v, f)
+            mesh.init(v, f)
+            if verbose:
+                print(f"After hole fill: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     
     if use_tqdm:
         pbar.update(1)
@@ -643,7 +819,10 @@ def to_glb(
             pbar.set_description("Pruning invisible faces")
         if verbose:
             print("Pruning invisible faces...", end='', flush=True)
-            
+        
+        # Free GPU memory before rasterization-heavy visibility check
+        torch.cuda.empty_cache()
+        
         v, f = mesh.read()
         visible_mask = get_visible_faces(v, f, verbose=verbose)
         
@@ -859,6 +1038,12 @@ def to_glb(
     if shade_smooth and shade_smooth_angle > 0:
         import trimesh.graph as tg
         textured_mesh = tg.smooth_shade(textured_mesh, np.radians(shade_smooth_angle))
+
+    # Apply Smooth Normals (from ComfyUI-Trellis2 SmoothNormals node)
+    if smooth_normals:
+        if verbose:
+            print("Applying smooth vertex normals...")
+        textured_mesh = smooth_vertex_normals(textured_mesh)
     
     if use_tqdm:
         pbar.update(1)

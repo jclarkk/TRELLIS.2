@@ -322,13 +322,14 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     return processed_image
 
 
-def pack_state(latents: Tuple[SparseTensor, SparseTensor, int]) -> dict:
+def pack_state(latents: Tuple[SparseTensor, SparseTensor, int], is_hq: bool = False) -> dict:
     shape_slat, tex_slat, res = latents
     return {
         'shape_slat_feats': shape_slat.feats.cpu().numpy(),
         'tex_slat_feats': tex_slat.feats.cpu().numpy() if tex_slat is not None else None,
         'coords': shape_slat.coords.cpu().numpy(),
         'res': res,
+        'is_hq': is_hq,
     }
 
 
@@ -341,7 +342,8 @@ def unpack_state(state: dict) -> Tuple[SparseTensor, SparseTensor, int]:
         tex_slat = shape_slat.replace(torch.from_numpy(state['tex_slat_feats']).cuda())
     else:
         tex_slat = None
-    return shape_slat, tex_slat, state['res']
+    is_hq = state.get('is_hq', False)
+    return shape_slat, tex_slat, state['res'], is_hq
 
 
 def get_seed(randomize_seed: bool, seed: int) -> int:
@@ -368,6 +370,22 @@ def image_to_3d(
     tex_slat_sampling_steps: int,
     tex_slat_rescale_t: float,
     no_texture_gen: bool,
+
+    # High Quality Params
+    high_quality_mode: bool,
+    decimation_target: int,
+    remesh_method: str,
+    fill_holes_max_perimeter: int,
+    fill_holes_unlimited: bool,
+    remove_floaters_enabled: bool,
+    smooth_normals: bool,
+    remesh_quad: bool,
+    repair_method: str,
+    simplify_method: str,
+    prune_invisible_faces: bool,
+    merge_vertices_dist: float,
+    shade_smooth: bool,
+    shade_smooth_angle: float,
 
     max_num_tokens: int,
     req: gr.Request,
@@ -405,12 +423,115 @@ def image_to_3d(
         }[resolution],
         return_latent=True,
         max_num_tokens=max_num_tokens,
-        no_texture_gen=no_texture_gen,
+        generate_texture_slat=not (no_texture_gen or high_quality_mode), # Disable texture here if High Quality is enabled
     )
+    
+    # Convert immutable tuple into a mutable list to allow element reassignment
+    latents = list(latents)
+
+    if high_quality_mode:
+        # Step 2: Extract base mesh and Post Process
+        mesh = outputs[0]
+        # We need the MeshWithVoxel version, pipeline.run returns a list of representations.Mesh
+        # Actually in TRELLIS.2 it returns representations.Mesh. 
+        # But wait, o_voxel requires MeshWithVoxel for `.attrs`.
+        # For High Quality, pipeline.refine_mesh expects a trimesh.Trimesh, not MeshWithVoxel!
+        import trimesh
+        base_trimesh = trimesh.Trimesh(
+            vertices=mesh.vertices.cpu().numpy(),
+            faces=mesh.faces.cpu().numpy(),
+            process=False
+        )
+
+        # Repair and Simplify base mesh
+        cleaned_mesh = postprocess_mesh(
+            mesh=base_trimesh,
+            res=latents[2], # res is the third packing
+            decimation_target=decimation_target,
+            remesh_method=remesh_method,
+            fill_holes_max_perimeter=fill_holes_max_perimeter,
+            fill_holes_unlimited=fill_holes_unlimited,
+            remove_floaters_enabled=remove_floaters_enabled,
+            smooth_normals=smooth_normals,
+            remesh_quad=remesh_quad,
+            repair_method=repair_method,
+            simplify_method=simplify_method,
+            prune_invisible_faces=prune_invisible_faces,
+            merge_vertices_dist=merge_vertices_dist,
+            shade_smooth=shade_smooth,
+            shade_smooth_angle=shade_smooth_angle
+        )
+        
+        # Step 3: Refine Mesh
+        # refine_mesh expects a Y-up mesh because its internal preprocess_mesh converts Y-up to Z-up.
+        # However, the mesh from run() is already Z-up. We must convert it to Y-up here.
+        y_up_vertices = cleaned_mesh.vertices.copy()
+        tmp = y_up_vertices[:, 1].copy()
+        y_up_vertices[:, 1] = y_up_vertices[:, 2]
+        y_up_vertices[:, 2] = -tmp
+        cleaned_mesh.vertices = y_up_vertices
+        
+        # refine_mesh returns (out_mesh_list, (shape_slat, tex_slat, res)) when return_latent=True
+        refined_outputs, refined_latents = pipeline.refine_mesh(
+            mesh=cleaned_mesh,
+            image=image,
+            seed=seed,
+            shape_slat_sampler_params={
+                "steps": shape_slat_sampling_steps,
+                "guidance_strength": shape_slat_guidance_strength,
+                "guidance_rescale": shape_slat_guidance_rescale,
+                "rescale_t": shape_slat_rescale_t,
+            },
+            tex_slat_sampler_params={
+                "steps": tex_slat_sampling_steps,
+            },
+            resolution=int(resolution.split('_')[0]),
+            max_num_tokens=max_num_tokens,
+            generate_texture_slat=not no_texture_gen,  # Generate texture latent for GLB export
+            return_latent=True,
+            downsampling=16,
+            use_tiled=True,
+            max_views=4
+        )
+        latents[0] = refined_latents[0]  # shape_slat (SparseTensor)
+        if refined_latents[1] is not None:
+            latents[1] = refined_latents[1]  # tex_slat (SparseTensor)
+        latents[2] = refined_latents[2]  # res (int)
+        
+        # Step 4: Post-Process Refined Mesh Again Before Texturing
+        # refined_outputs already contains decoded MeshWithVoxel objects from refine_mesh
+        refined_mesh_rep = refined_outputs[0]
+        refined_trimesh = trimesh.Trimesh(
+            vertices=refined_mesh_rep.vertices.cpu().numpy(),
+            faces=refined_mesh_rep.faces.cpu().numpy(),
+            process=False
+        )
+        
+        final_clean_mesh = postprocess_mesh(
+             mesh=refined_trimesh,
+             res=latents[2],
+             decimation_target=decimation_target,
+             remesh_method=remesh_method,
+             fill_holes_max_perimeter=fill_holes_max_perimeter,
+             fill_holes_unlimited=fill_holes_unlimited,
+             remove_floaters_enabled=remove_floaters_enabled,
+             smooth_normals=smooth_normals,
+             remesh_quad=remesh_quad,
+             repair_method=repair_method,
+             simplify_method=simplify_method,
+             prune_invisible_faces=prune_invisible_faces,
+             merge_vertices_dist=merge_vertices_dist,
+             shade_smooth=shade_smooth,
+             shade_smooth_angle=shade_smooth_angle
+        )
+        
+        # For the preview, use the refined (untextured) mesh directly.
+        outputs = refined_outputs
+
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
-    state = pack_state(latents)
+    state = pack_state(latents, is_hq=high_quality_mode)
     torch.cuda.empty_cache()
 
     # --- HTML Construction ---
@@ -479,12 +600,123 @@ def image_to_3d(
     return state, full_html
 
 
+def postprocess_mesh(
+    mesh,
+    res: int,
+    decimation_target: int,
+    remesh_method: str,
+    fill_holes_max_perimeter: int,
+    fill_holes_unlimited: bool,
+    remove_floaters_enabled: bool,
+    smooth_normals: bool,
+    remesh_quad: bool,
+    repair_method: str,
+    simplify_method: str,
+    prune_invisible_faces: bool,
+    merge_vertices_dist: float,
+    shade_smooth: bool,
+    shade_smooth_angle: float,
+):
+    # The actual processing logic taken from to_glb
+    # In TRELLIS.2, `mesh` is an instance of `MeshWithVoxel` which has vertices, faces, attrs
+    # We will use the o_voxel postprocess algorithms directly, or build a mini-pipeline here.
+    # Since `extract_glb` calls `o_voxel.postprocess.to_glb` which does ALL of it and returns 
+    # a trimesh.Scene/trimesh.Trimesh, let's extract the part that gives us a trimesh.Trimesh.
+    
+    # We will replicate the internal steps of `o_voxel.postprocess.to_glb` to return a raw mesh
+    # o_voxel.postprocess.to_glb essentially remeshes, fills holes, removes floaters, and simplifies.
+    
+    import trimesh
+    # Assuming mesh is MeshWithVoxel or similar struct
+    # Convert base mesh attrs to standard trimesh if it isn't one already.
+    # Since `to_glb` is closed logic that outputs a `.glb` bytes object or trimesh.Scene,
+    # we simulate the core parts based on ComfyUI-Trellis2 logic.
+    
+    out_mesh = trimesh.Trimesh(
+        vertices=mesh.vertices.cpu().numpy() if hasattr(mesh.vertices, 'cpu') else mesh.vertices,
+        faces=mesh.faces.cpu().numpy() if hasattr(mesh.faces, 'cpu') else mesh.faces,
+        process=False
+    )
+    
+    # 1. Fill holes
+    if repair_method == "cumesh" or repair_method == "meshlib":
+        # we will use the same flags
+        if repair_method == "meshlib":
+            try:
+                import meshlib.mrmeshpy as mrmeshpy
+                import tempfile
+                import os
+                
+                with tempfile.NamedTemporaryFile(suffix='.obj', delete=False) as tmp:
+                    tmp_name = tmp.name
+                
+                out_mesh.export(tmp_name)
+                msh = mrmeshpy.loadMesh(tmp_name)
+                e = msh.topology.findHoleRepresentiveEdges()
+                if fill_holes_unlimited:
+                    mrmeshpy.fillHoles(msh, e)
+                else:
+                    mrmeshpy.fillHoles(msh, e, mrmeshpy.FillHoleParams(maxPerimeter=fill_holes_max_perimeter))
+                mrmeshpy.saveMesh(msh, tmp_name)
+                
+                out_mesh = trimesh.load(tmp_name, process=False)
+                os.remove(tmp_name)
+            except ImportError:
+                print("Meshlib not installed, skipping.")
+        elif repair_method == "cumesh":
+            import cumesh
+            import torch
+            v_t = torch.from_numpy(out_mesh.vertices).cuda().float()
+            f_t = torch.from_numpy(out_mesh.faces).cuda().int()
+            c_mesh = cumesh.CuMesh()
+            c_mesh.init(v_t, f_t)
+            c_mesh.fill_holes(max_hole_perimeter=fill_holes_max_perimeter)
+            v_t, f_t = c_mesh.read()
+            out_mesh = trimesh.Trimesh(vertices=v_t.cpu().numpy(), faces=f_t.cpu().numpy(), process=False)
+            
+    # Floater removal
+    if remove_floaters_enabled:
+        components = out_mesh.split(only_watertight=False)
+        if len(components) > 1:
+            total_faces = sum(len(c.faces) for c in components)
+            min_faces = total_faces * 0.001
+            kept = [c for c in components if len(c.faces) >= min_faces]
+            if not kept:
+                kept = [max(components, key=lambda c: len(c.faces))]
+            if len(kept) == 1:
+                out_mesh = kept[0]
+            else:
+                import trimesh.util
+                out_mesh = trimesh.util.concatenate(kept)
+            
+    # 2. Quad or Dual Contouring Remesh (Assuming standard simplification)
+    if simplify_method == "cumesh":
+        import cumesh
+        import torch
+        v_t = torch.from_numpy(out_mesh.vertices).cuda().float()
+        f_t = torch.from_numpy(out_mesh.faces).cuda().int()
+        c_mesh = cumesh.CuMesh()
+        c_mesh.init(v_t, f_t)
+        c_mesh.simplify(decimation_target)
+        v_t, f_t = c_mesh.read()
+        out_mesh = trimesh.Trimesh(vertices=v_t.cpu().numpy(), faces=f_t.cpu().numpy(), process=False)
+
+    # Note: ComfyUI-Trellis2 uses `mesh = pipeline.preprocess_mesh(mesh)` right after this 
+    # before feeding it back into `refine_mesh`
+    return out_mesh
+
+
+
 def extract_glb(
     state: dict,
     decimation_target: int,
     texture_size: int,
     remesh_method: str,
     fill_holes_max_perimeter: int,
+    fill_holes_unlimited: bool,
+    remove_floaters_enabled: bool,
+    smooth_normals: bool,
+    remesh_quad: bool,
     repair_method: str,
     simplify_method: str,
     no_texture_gen: bool,
@@ -509,10 +741,26 @@ def extract_glb(
     texture_extraction = not no_texture_gen
 
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
-    shape_slat, tex_slat, res = unpack_state(state)
+    shape_slat, tex_slat, res, is_hq = unpack_state(state)
     mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+    
+    # If no texture latent was generated (e.g. HQ mode), skip texture extraction
+    if mesh.attrs is None:
+        texture_extraction = False
+    
+    # Re-center vertices if significantly off-center (HQ mode produces off-center mesh)
+    vertices = mesh.vertices
+    vmin = vertices.min(dim=0).values
+    vmax = vertices.max(dim=0).values
+    mesh_center = (vmin + vmax) / 2
+    if abs(mesh_center[0].item()) > 0.05 or abs(mesh_center[1].item()) > 0.05 or abs(mesh_center[2].item()) > 0.05:
+        mesh_extent = (vmax - vmin).max()
+        scale = 0.99999 / mesh_extent
+        vertices = (vertices - mesh_center) * scale
+        print(f"[DEBUG] GLB: Re-centered vertices from center={mesh_center.tolist()}")
+    
     glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
+        vertices=vertices,
         faces=mesh.faces,
         attr_volume=mesh.attrs,
         coords=mesh.coords,
@@ -521,6 +769,9 @@ def extract_glb(
         aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
         decimation_target=decimation_target,
         fill_holes_max_perimeter=fill_holes_max_perimeter,
+        fill_holes_unlimited=fill_holes_unlimited,
+        remove_floaters_enabled=remove_floaters_enabled,
+        smooth_normals=smooth_normals,
         repair_method=repair_method,
         simplify_method=simplify_method,
         texture_extraction=texture_extraction,
@@ -529,8 +780,10 @@ def extract_glb(
         remesh_band=1,
         remesh_project=0,
         remesh_method=remesh_method,
+        remesh_quad=remesh_quad,
         prune_invisible=prune_invisible_faces,
         merge_vertices_dist=merge_vertices_dist,
+        shade_smooth=shade_smooth,
         shade_smooth_angle=shade_smooth_angle,
         use_tqdm=True,
     )
@@ -538,7 +791,7 @@ def extract_glb(
     timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
     os.makedirs(user_dir, exist_ok=True)
     glb_path = os.path.join(user_dir, f'sample_{timestamp}.glb')
-    glb.export(glb_path, extension_webp=True)
+    glb.export(glb_path)
     torch.cuda.empty_cache()
     return glb_path, glb_path
 
@@ -557,15 +810,20 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             resolution = gr.Radio(["512", "1024", "1024_cascade", "1536_cascade", "2048_cascade"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
-            decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)
+            decimation_target = gr.Slider(100000, 4000000, label="Decimation Target", value=500000, step=10000)
             fill_holes_max_perimeter = gr.Slider(0.0, 1.0, label="Fill holes max perimeter", value=0.0, step=0.05)
+            fill_holes_unlimited = gr.Checkbox(label="Fill ALL Holes (Unlimited, MeshLib)", value=False)
+            remove_floaters_enabled = gr.Checkbox(label="Remove Floaters", value=False)
+            smooth_normals = gr.Checkbox(label="Smooth Normals", value=False)
             remesh_method = gr.Dropdown(["dual_contouring", "dual_contouring_vb", "faithful_contouring"], label="Remesh Method", value="dual_contouring")
-            repair_method = gr.Dropdown(["cumesh", "meshlib", "pymeshfix"], label="Repair (Fill Holes) Method", value="")
+            remesh_quad = gr.Checkbox(label="Quad Dual Contouring (requires CuMesh support)", value=False)
+            repair_method = gr.Dropdown(["cumesh", "meshlib", "pymeshfix"], label="Repair (Fill Holes) Method", value="cumesh")
             simplify_method = gr.Dropdown(["cumesh", "meshlib", "None"], label="Simplify Method", value="cumesh")
             prune_invisible_faces = gr.Checkbox(label="Prune Invisible Faces", value=True)
             merge_vertices_dist = gr.Slider(0.0, 1.0, label="Merge Vertices Dist", value=0.1, step=0.01)
             shade_smooth = gr.Checkbox(label="Shade Smooth", value=True)
             shade_smooth_angle = gr.Slider(0, 90, label="Shade Smooth Angle", value=0, step=1)
+            high_quality_mode = gr.Checkbox(label="High Quality Iterative Mode (Refine Mesh + Baked Texture)", value=False)
             no_texture_gen = gr.Checkbox(label="Skip Texture Generation", value=False)
             texture_size = gr.Slider(1024, 4096, label="Texture Size", value=2048, step=1024)
 
@@ -586,7 +844,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
                     shape_slat_guidance_rescale = gr.Slider(0.0, 1.0, label="Guidance Rescale", value=0.5, step=0.01)
                     shape_slat_sampling_steps = gr.Slider(1, 50, label="Sampling Steps", value=12, step=1)
                     shape_slat_rescale_t = gr.Slider(1.0, 6.0, label="Rescale T", value=3.0, step=0.1)
-                    max_num_tokens = gr.Slider(10000, 200000, label="Max Number of Tokens", value=49152, step=1000)
+                    max_num_tokens = gr.Slider(10000, 999999, label="Max Number of Tokens", value=49152, step=1000)
                 gr.Markdown("Stage 3: Material Generation")
                 with gr.Row():
                     tex_slat_guidance_strength = gr.Slider(1.0, 10.0, label="Guidance Strength", value=1.0, step=0.1)
@@ -642,7 +900,9 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             ss_guidance_strength, ss_guidance_rescale, ss_sampling_steps, ss_rescale_t,
             shape_slat_guidance_strength, shape_slat_guidance_rescale, shape_slat_sampling_steps, shape_slat_rescale_t,
 
-            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, no_texture_gen, max_num_tokens,
+            tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, no_texture_gen, 
+            high_quality_mode, decimation_target, remesh_method, fill_holes_max_perimeter, fill_holes_unlimited, remove_floaters_enabled, smooth_normals, remesh_quad, repair_method, simplify_method, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle,
+            max_num_tokens,
         ],
         outputs=[output_buf, preview_output],
     )
@@ -651,7 +911,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         lambda: gr.Walkthrough(selected=1), outputs=walkthrough
     ).then(
         extract_glb,
-        inputs=[output_buf, decimation_target, texture_size, remesh_method, fill_holes_max_perimeter, repair_method, simplify_method, no_texture_gen, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle],
+        inputs=[output_buf, decimation_target, texture_size, remesh_method, fill_holes_max_perimeter, fill_holes_unlimited, remove_floaters_enabled, smooth_normals, remesh_quad, repair_method, simplify_method, no_texture_gen, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle],
         outputs=[glb_output, download_btn],
     )
 
