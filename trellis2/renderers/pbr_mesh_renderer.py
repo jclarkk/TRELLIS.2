@@ -330,7 +330,7 @@ class PbrMeshRenderer:
                             torch.cat([torch.zeros_like(mesh.coords[..., :1]), mesh.coords], dim=-1),
                             mesh.voxel_shape,
                             xyz,
-                            mode='trilinear'
+                            mode='nearest'
                         )
                         img = img.reshape(1, resolution * ssaa, resolution * ssaa, mesh.attrs.shape[-1]) * mask
                         gb_basecolor = img[0, ..., mesh.layout['base_color']]

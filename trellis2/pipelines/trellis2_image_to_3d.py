@@ -531,6 +531,48 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self._cleanup_cuda()
         return coords
 
+    def voxelize_mesh_to_coords(
+        self,
+        mesh: trimesh.Trimesh,
+        resolution: int = 32,
+    ) -> torch.Tensor:
+        """
+        Voxelize an external mesh to produce sparse structure coordinates,
+        bypassing the sparse structure flow model.
+
+        Args:
+            mesh (trimesh.Trimesh): The input mesh (Y-up convention expected,
+                will be normalized and converted to Z-up internally).
+            resolution (int): The voxelization grid resolution (default 32).
+
+        Returns:
+            torch.Tensor: Occupied voxel coordinates as (N, 4) int tensor
+                [batch_idx, x, y, z], same format as sample_sparse_structure().
+        """
+        mesh = self.preprocess_mesh(mesh)
+        vertices = torch.from_numpy(mesh.vertices).float()
+        faces = torch.from_numpy(mesh.faces).long()
+
+        # Voxelize using o_voxel at the target resolution
+        voxel_indices, _, _ = o_voxel.convert.mesh_to_flexible_dual_grid(
+            vertices.cpu(), faces.cpu(),
+            grid_size=resolution,
+            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            face_weight=1.0,
+            boundary_weight=0.2,
+            regularization_weight=1e-2,
+        )
+
+        # Deduplicate voxel indices and prepend batch index (0)
+        unique_voxels = voxel_indices.unique(dim=0)
+        coords = torch.cat([
+            torch.zeros(unique_voxels.shape[0], 1, dtype=torch.int),
+            unique_voxels.int(),
+        ], dim=1)
+
+        print(f"Voxelized input mesh: {coords.shape[0]} occupied voxels at resolution {resolution}")
+        return coords
+
     def sample_shape_slat(
         self,
         cond: dict,
@@ -901,7 +943,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_views: int = 4,
         generate_texture_slat = True,
         use_tiled: bool = True,
-        pbar = None
+        pbar = None,
+        input_mesh: 'trimesh.Trimesh' = None,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -917,6 +960,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             return_latent (bool): Whether to return the latent codes.
             pipeline_type (str): The type of the pipeline. Options: '512', '1024', '1024_cascade', '1536_cascade'.
             max_num_tokens (int): The maximum number of tokens to use.
+            input_mesh (trimesh.Trimesh): Optional external mesh to use as base structure,
+                bypassing the sparse structure sampling stage.
         """
         if pbar is None:
             pbar = DummyPbar()
@@ -962,20 +1007,31 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if not self.keep_models_loaded:
             self.unload_image_cond_model()
         
-        #ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        # Per-pipeline-type sparse structure resolution.
+        # Each pipeline type expects a specific ss_res; using the wrong one
+        # feeds different-resolution coords into the shape model and shifts the mesh.
+        ss_res_map = {
+            '512': 32, '512g_1024t': 32,
+            '1024': 64, '1024_cascade': 64,
+            '1536_cascade': 32, '2048_cascade': 32,
+        }
+        ss_res = ss_res_map.get(pipeline_type, sparse_structure_resolution)
         
         # Sampling Sparse Structure
-        self.load_sparse_structure_model()        
-        coords = self.sample_sparse_structure(
-            cond_512, sparse_structure_resolution,
-            num_samples, sparse_structure_sampler_params
-        )
+        if input_mesh is not None:
+            print("Using external mesh as base structure (skipping sparse structure sampling)")
+            coords = self.voxelize_mesh_to_coords(input_mesh, resolution=ss_res)
+        else:
+            self.load_sparse_structure_model()        
+            coords = self.sample_sparse_structure(
+                cond_512, ss_res,
+                num_samples, sparse_structure_sampler_params
+            )
+            if not self.keep_models_loaded:
+                self.unload_sparse_structure_model()
         
         if pbar is not None:
             pbar.update(1)
-        
-        if not self.keep_models_loaded:
-            self.unload_sparse_structure_model()
         
         # Sampling Shape
         if pipeline_type == '512':            

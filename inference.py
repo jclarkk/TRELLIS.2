@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("--no_pbr", action="store_true", help="Does not attach the PBR textures to the final GLB")
     parser.add_argument("--webp", action="store_true", help="Use WEBP for texture compression in GLB")
     parser.add_argument("--max_num_tokens", type=int, default=49152, help="Max number of tokens")
+    parser.add_argument("--input_glb", type=str, default=None, help="Path to an existing GLB/OBJ/STL/PLY file to use as base structure (skips sparse structure stage)")
 
     parser.add_argument("--low_vram", action="store_true", help="Enable low VRAM mode")
 
@@ -201,6 +202,16 @@ def main():
     t2 = time.time()
     print(f"Images preprocessed in {t2 - t1:.2f} seconds")
 
+    # Load input mesh if provided
+    input_mesh = None
+    if args.input_glb:
+        import trimesh
+        print(f"Loading base structure mesh: {args.input_glb}")
+        input_mesh = trimesh.load(args.input_glb, process=False)
+        if isinstance(input_mesh, trimesh.Scene):
+            input_mesh = input_mesh.dump(concatenate=True)
+        print(f"  Loaded mesh: {len(input_mesh.vertices)} vertices, {len(input_mesh.faces)} faces")
+
     # Run Pipeline
     print("Running generation...")
     outputs, latents = pipeline.run(
@@ -236,6 +247,7 @@ def main():
         return_latent=True,
         max_num_tokens=args.max_num_tokens,
         generate_texture_slat=not (args.no_texture_gen or args.high_quality),
+        input_mesh=input_mesh,
     )
     
     # Convert immutable tuple into a mutable list to allow element reassignment

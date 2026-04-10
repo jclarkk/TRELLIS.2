@@ -388,9 +388,20 @@ def image_to_3d(
     shade_smooth_angle: float,
 
     max_num_tokens: int,
+    input_glb_path: str,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ) -> str:
+    # Load input mesh if provided
+    input_mesh = None
+    if input_glb_path is not None:
+        import trimesh as _trimesh
+        print(f"Loading base structure mesh: {input_glb_path}")
+        input_mesh = _trimesh.load(input_glb_path, process=False)
+        if isinstance(input_mesh, _trimesh.Scene):
+            input_mesh = input_mesh.dump(concatenate=True)
+        print(f"  Loaded mesh: {len(input_mesh.vertices)} vertices, {len(input_mesh.faces)} faces")
+
     # --- Sampling ---
     outputs, latents = pipeline.run(
         image,
@@ -424,6 +435,7 @@ def image_to_3d(
         return_latent=True,
         max_num_tokens=max_num_tokens,
         generate_texture_slat=not (no_texture_gen or high_quality_mode), # Disable texture here if High Quality is enabled
+        input_mesh=input_mesh,
     )
     
     # Convert immutable tuple into a mutable list to allow element reassignment
@@ -530,6 +542,17 @@ def image_to_3d(
 
     mesh = outputs[0]
     mesh.simplify(16777216) # nvdiffrast limit
+    
+    # Center mesh at origin for preview rendering.
+    # The camera orbits [0,0,0], so an off-center mesh looks wrong.
+    # Shift both vertices AND origin by the same delta to keep
+    # texture lookup ((v - origin) / voxel_size) unchanged.
+    vmin = mesh.vertices.min(dim=0).values
+    vmax = mesh.vertices.max(dim=0).values
+    mesh_center = (vmin + vmax) / 2
+    mesh.vertices = mesh.vertices - mesh_center
+    mesh.origin = mesh.origin - mesh_center
+    
     images = render_utils.render_snapshot(mesh, resolution=1024, r=2, fov=36, nviews=STEPS, envmap=envmap)
     state = pack_state(latents, is_hq=high_quality_mode)
     torch.cuda.empty_cache()
@@ -748,16 +771,26 @@ def extract_glb(
     if mesh.attrs is None:
         texture_extraction = False
     
-    # Re-center vertices if significantly off-center (HQ mode produces off-center mesh)
+    # Re-center vertices only for HQ mode (refinement can shift the mesh).
+    # Standard mode vertices are already in the correct [-0.5, 0.5] coordinate
+    # system and must NOT be shifted/rescaled — doing so breaks texture alignment
+    # because the voxel grid (attrs/coords) still references the original space.
     vertices = mesh.vertices
-    vmin = vertices.min(dim=0).values
-    vmax = vertices.max(dim=0).values
-    mesh_center = (vmin + vmax) / 2
-    if abs(mesh_center[0].item()) > 0.05 or abs(mesh_center[1].item()) > 0.05 or abs(mesh_center[2].item()) > 0.05:
-        mesh_extent = (vmax - vmin).max()
-        scale = 0.99999 / mesh_extent
-        vertices = (vertices - mesh_center) * scale
-        print(f"[DEBUG] GLB: Re-centered vertices from center={mesh_center.tolist()}")
+    glb_aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
+    
+    if is_hq:
+        vmin = vertices.min(dim=0).values
+        vmax = vertices.max(dim=0).values
+        mesh_center = (vmin + vmax) / 2
+        if abs(mesh_center[0].item()) > 0.05 or abs(mesh_center[1].item()) > 0.05 or abs(mesh_center[2].item()) > 0.05:
+            # Shift only — no rescale, to preserve coordinate alignment with voxel grid
+            vertices = vertices - mesh_center
+            # Shift the AABB by the same amount so texture sampling stays correct
+            glb_aabb = [
+                [-0.5 - mesh_center[0].item(), -0.5 - mesh_center[1].item(), -0.5 - mesh_center[2].item()],
+                [ 0.5 - mesh_center[0].item(),  0.5 - mesh_center[1].item(),  0.5 - mesh_center[2].item()],
+            ]
+            print(f"[DEBUG] GLB: Re-centered HQ vertices from center={mesh_center.tolist()}")
     
     glb = o_voxel.postprocess.to_glb(
         vertices=vertices,
@@ -766,7 +799,7 @@ def extract_glb(
         coords=mesh.coords,
         attr_layout=pipeline.pbr_attr_layout,
         grid_size=res,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        aabb=glb_aabb,
         decimation_target=decimation_target,
         fill_holes_max_perimeter=fill_holes_max_perimeter,
         fill_holes_unlimited=fill_holes_unlimited,
@@ -806,6 +839,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     with gr.Row():
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
+            input_glb_file = gr.File(label="Base Structure GLB (optional, skips sparse structure stage)", file_types=[".glb", ".obj", ".stl", ".ply"], type="filepath")
 
             resolution = gr.Radio(["512", "1024", "1024_cascade", "1536_cascade", "2048_cascade"], label="Resolution", value="1024")
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
@@ -902,7 +936,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
 
             tex_slat_guidance_strength, tex_slat_guidance_rescale, tex_slat_sampling_steps, tex_slat_rescale_t, no_texture_gen, 
             high_quality_mode, decimation_target, remesh_method, fill_holes_max_perimeter, fill_holes_unlimited, remove_floaters_enabled, smooth_normals, remesh_quad, repair_method, simplify_method, prune_invisible_faces, merge_vertices_dist, shade_smooth, shade_smooth_angle,
-            max_num_tokens,
+            max_num_tokens, input_glb_file,
         ],
         outputs=[output_buf, preview_output],
     )
